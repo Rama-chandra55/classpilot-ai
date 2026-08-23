@@ -10,9 +10,21 @@ Content-reading capabilities (honest):
   Google Sheets     → CSV via Drive export                 ✅
   Plain text files  → raw content via Drive download       ✅
   PowerPoint .pptx  → full slide text via python-pptx      ✅
-  PDF (uploaded)    → URL only, no text extraction         ⚠️
-  Legacy .ppt       → URL only, no text extraction         ⚠️
+  PDF (uploaded)    → full text via pypdf                  ✅
+  Word .docx        → full text via python-docx            ✅
+  PNG/JPEG images   → handed to the AI as visual content    ✅ (see below)
+  Legacy .ppt/.doc  → URL only, no text extraction         ⚠️
   YouTube / links   → URL only                             ⚠️
+
+Visual content (diagrams/charts/screenshots — NOT OCR):
+  PPTX/PDF/DOCX materials often contain diagram-only slides/pages that have
+  no extractable text at all (e.g. an architecture diagram with no title).
+  read_drive_file() additionally pulls out important embedded images via
+  visual_extractor.py and returns them under "visuals" so the connected AI
+  can look at them directly with its own vision, the same way a human
+  would. This is separate from and does not change the text extraction
+  above in any way — see visual_extractor.py for the filtering approach
+  (size + repeated-logo/watermark filtering, capped per file).
 
 All functions raise exceptions on failure; callers catch and surface errors.
 """
@@ -22,9 +34,17 @@ import logging
 from typing import Any, Optional
 
 from .classroom_client import classroom, drive, docs
+from .visual_extractor import (
+    extract_pptx_visuals,
+    extract_pdf_visuals,
+    extract_docx_visuals,
+    prepare_standalone_image,
+)
 from classroom_suite_mcp.auth import get_classroom_service, get_drive_service, get_docs_service
 from googleapiclient.http import MediaIoBaseDownload
 from pptx import Presentation
+from pypdf import PdfReader
+from docx import Document as DocxDocument
 
 logger = logging.getLogger(__name__)
 
@@ -50,27 +70,88 @@ _PPTX_TYPES = {
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 }
 
+# Uploaded .pdf — downloaded and parsed with pypdf.
+_PDF_TYPES = {
+    "application/pdf",
+}
+
+# Uploaded .docx (OOXML) — downloaded and parsed with python-docx.
+# Legacy binary .doc is NOT supported by python-docx and stays in
+# _URL_ONLY_TYPES below.
+_DOCX_TYPES = {
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
+# Uploaded standalone image files — downloaded directly and handed to the
+# connected AI as visual content (no OCR, no filtering: the whole file IS
+# the material). Diagram/chart images *embedded inside* PPTX/PDF/DOCX are
+# handled separately by visual_extractor.py.
+_IMAGE_TYPES = {
+    "image/png", "image/jpeg", "image/jpg",
+}
+
 # Types we cannot read — return URL only
 _URL_ONLY_TYPES = {
-    "application/pdf",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.ms-powerpoint",
-    "image/jpeg", "image/png", "image/gif", "image/webp",
+    "application/msword",
+    "image/gif", "image/webp",
     "video/mp4", "audio/mpeg",
 }
 
 
+# ── Pagination helper ──────────────────────────────────────────────────────────
+
+def _paginate(list_fn, item_key: str, params: dict) -> list[dict]:
+    """
+    Drive a Google Classroom `.list()` endpoint to exhaustion.
+
+    Classroom list endpoints (courses, topics, courseWorkMaterials, courseWork,
+    announcements, ...) cap each response to a single page and return a
+    `nextPageToken` when more results exist. Calling `.list().execute()` once
+    silently truncates to that first page. This helper repeatedly calls
+    `list_fn(**params, pageToken=...)` and follows `nextPageToken` until the
+    API stops returning one, accumulating every item under `item_key` across
+    all pages.
+
+    Args:
+        list_fn: bound `.list` method, e.g. `svc.courses().list`.
+        item_key: the response key holding this page's items
+                   (e.g. "courses", "topic", "courseWork").
+        params: base query params (courseId, courseStates, pageSize, ...),
+                without pageToken — pageToken is added automatically.
+
+    Returns:
+        All items across every page, in the order the API returned them.
+    """
+    items: list[dict] = []
+    page_token: Optional[str] = None
+    while True:
+        call_params = dict(params)
+        if page_token:
+            call_params["pageToken"] = page_token
+        result = list_fn(**call_params).execute()
+        items.extend(result.get(item_key) or [])
+        page_token = result.get("nextPageToken")
+        if not page_token:
+            break
+    return items
+
+
 # ── 1. Courses ────────────────────────────────────────────────────────────────
 
-def fetch_courses(page_size: int = 50) -> list[dict[str, Any]]:
-    """List all active Classroom courses the student is enrolled in."""
+def fetch_courses(page_size: int = 100) -> list[dict[str, Any]]:
+    """List all active Classroom courses the student is enrolled in.
+
+    Pages through the full result set — courses are not silently truncated
+    if the student is enrolled in more than one page's worth.
+    """
     svc = get_classroom_service()
-    result = svc.courses().list(
-        courseStates=["ACTIVE"],
-        pageSize=page_size,
-    ).execute()
-    raw = result.get("courses", [])
+    raw = _paginate(
+        svc.courses().list,
+        "courses",
+        {"courseStates": ["ACTIVE"], "pageSize": page_size},
+    )
     return [
         {
             "id":          c.get("id"),
@@ -87,11 +168,18 @@ def fetch_courses(page_size: int = 50) -> list[dict[str, Any]]:
 
 # ── 2. Topics / Modules ───────────────────────────────────────────────────────
 
-def fetch_topics(course_id: str) -> list[dict[str, Any]]:
-    """List all topics (modules) in a course, ordered by topicId."""
+def fetch_topics(course_id: str, page_size: int = 100) -> list[dict[str, Any]]:
+    """List all topics (modules) in a course, ordered by topicId.
+
+    Pages through the full result set — courses with many modules will not
+    have later topics silently dropped.
+    """
     svc = get_classroom_service()
-    result = svc.courses().topics().list(courseId=course_id).execute()
-    raw = result.get("topic", [])
+    raw = _paginate(
+        svc.courses().topics().list,
+        "topic",
+        {"courseId": course_id, "pageSize": page_size},
+    )
     # Classroom API returns topics with updateTime but no explicit order field;
     # topicId is an incrementing integer — sort ascending to get creation order.
     sorted_topics = sorted(raw, key=lambda t: int(t.get("topicId", "0")))
@@ -111,11 +199,16 @@ def fetch_course_work_materials(course_id: str, topic_id: Optional[str] = None) 
     """
     Fetch teacher-posted study materials (courseWorkMaterial resources).
     Requires the classroom.courseworkmaterials scope.
+
+    Pages through the full result set before filtering by topic, so modules
+    beyond the first page of materials are not silently dropped.
     """
     svc = get_classroom_service()
-    params: dict = {"courseId": course_id, "pageSize": 100}
-    result = svc.courses().courseWorkMaterials().list(**params).execute()
-    items = result.get("courseWorkMaterial", [])
+    items = _paginate(
+        svc.courses().courseWorkMaterials().list,
+        "courseWorkMaterial",
+        {"courseId": course_id, "pageSize": 100},
+    )
     if topic_id:
         items = [i for i in items if i.get("topicId") == topic_id]
     return [_normalise_material(m, "MATERIAL") for m in items]
@@ -125,25 +218,33 @@ def fetch_assignments(course_id: str, topic_id: Optional[str] = None) -> list[di
     """
     Fetch assignments for a course/topic.
     Shown as info only — no submission capability exposed.
+
+    Pages through the full result set before filtering by topic.
     """
     svc = get_classroom_service()
-    result = svc.courses().courseWork().list(
-        courseId=course_id, pageSize=100
-    ).execute()
-    items = result.get("courseWork", [])
+    items = _paginate(
+        svc.courses().courseWork().list,
+        "courseWork",
+        {"courseId": course_id, "pageSize": 100},
+    )
     if topic_id:
         items = [i for i in items if i.get("topicId") == topic_id]
     return [_normalise_material(m, "ASSIGNMENT") for m in items]
 
 
 def fetch_announcements(course_id: str) -> list[dict]:
-    """Fetch course announcements. Requires classroom.announcements scope."""
+    """Fetch course announcements. Requires classroom.announcements scope.
+
+    Pages through the full result set so older announcements beyond the
+    first page are still returned.
+    """
     svc = get_classroom_service()
     try:
-        result = svc.courses().announcements().list(
-            courseId=course_id, pageSize=50
-        ).execute()
-        items = result.get("announcement", [])
+        items = _paginate(
+            svc.courses().announcements().list,
+            "announcement",
+            {"courseId": course_id, "pageSize": 100},
+        )
         return [_normalise_material(a, "ANNOUNCEMENT") for a in items]
     except Exception as exc:
         logger.warning("Could not fetch announcements for %s: %s", course_id, exc)
@@ -205,7 +306,9 @@ def _normalise_material(raw: dict, kind: str) -> dict:
 
 def read_drive_file(file_id: str) -> dict[str, Any]:
     """
-    Attempt to read the text content of a Drive file.
+    Attempt to read the text content of a Drive file, and — for
+    PPTX/PDF/DOCX and direct image attachments — pull out any important
+    embedded images/diagrams/charts as well.
 
     Returns a dict with:
       readable  bool   — True if text content was extracted
@@ -214,6 +317,12 @@ def read_drive_file(file_id: str) -> dict[str, Any]:
       name      str    — filename
       link      str    — webViewLink for the user to open manually
       note      str    — human-readable explanation when not readable
+      visuals   list   — important images for the connected AI to look at
+                          directly (NOT OCR — raw image bytes only). Each
+                          item: {mime_type, data, location, caption,
+                          diagram_only, area_ratio}. Empty for file types
+                          with no visual pipeline, or when a file has no
+                          images meeting the significance threshold.
     """
     svc = get_drive_service()
 
@@ -246,6 +355,7 @@ def read_drive_file(file_id: str) -> dict[str, Any]:
                 "name":      name,
                 "link":      link,
                 "note":      "" if readable else "File exported but contained no text.",
+                "visuals":   [],
             }
         except Exception as exc:
             logger.warning("Export failed for %s (%s): %s", name, mime, exc)
@@ -269,6 +379,7 @@ def read_drive_file(file_id: str) -> dict[str, Any]:
                 "name":      name,
                 "link":      link,
                 "note":      "" if readable else "PPTX downloaded but no extractable text was found (slides may be image-only).",
+                "visuals":   _safe_extract_visuals(extract_pptx_visuals, buf, name),
             }
         except Exception as exc:
             logger.warning("PPTX extraction failed for %s: %s", name, exc)
@@ -276,6 +387,86 @@ def read_drive_file(file_id: str) -> dict[str, Any]:
                 name, mime, link,
                 f"Could not read PowerPoint content ({exc}). Open the link to view it.",
             )
+
+    # ── Uploaded .pdf: download raw bytes and parse with pypdf ────────────────
+    if mime in _PDF_TYPES:
+        try:
+            request = svc.files().get_media(fileId=file_id)
+            buf = io.BytesIO()
+            dl = MediaIoBaseDownload(buf, request)
+            done = False
+            while not done:
+                _, done = dl.next_chunk()
+            text = _extract_pdf_text(buf)
+            readable = bool(text)
+            return {
+                "readable":  readable,
+                "content":   text if readable else "",
+                "mime_type": mime,
+                "name":      name,
+                "link":      link,
+                "note":      "" if readable else "PDF downloaded but no extractable text was found (it may be scanned/image-only).",
+                "visuals":   _safe_extract_visuals(extract_pdf_visuals, buf, name),
+            }
+        except Exception as exc:
+            logger.warning("PDF extraction failed for %s: %s", name, exc)
+            return _url_only(
+                name, mime, link,
+                f"Could not read PDF content ({exc}). Open the link to view it.",
+            )
+
+    # ── Uploaded .docx: download raw bytes and parse with python-docx ─────────
+    if mime in _DOCX_TYPES:
+        try:
+            request = svc.files().get_media(fileId=file_id)
+            buf = io.BytesIO()
+            dl = MediaIoBaseDownload(buf, request)
+            done = False
+            while not done:
+                _, done = dl.next_chunk()
+            text = _extract_docx_text(buf)
+            readable = bool(text)
+            return {
+                "readable":  readable,
+                "content":   text if readable else "",
+                "mime_type": mime,
+                "name":      name,
+                "link":      link,
+                "note":      "" if readable else "DOCX downloaded but no extractable text was found.",
+                "visuals":   _safe_extract_visuals(extract_docx_visuals, buf, name),
+            }
+        except Exception as exc:
+            logger.warning("DOCX extraction failed for %s: %s", name, exc)
+            return _url_only(
+                name, mime, link,
+                f"Could not read Word document content ({exc}). Open the link to view it.",
+            )
+
+    # ── Uploaded image (PNG/JPEG): download raw bytes, no text/OCR ────────────
+    # The whole file IS the material here, so it's handed over as-is —
+    # no size/repetition filtering (that's only needed for images embedded
+    # among many shapes in a slide/page/document).
+    if mime in _IMAGE_TYPES:
+        try:
+            request = svc.files().get_media(fileId=file_id)
+            buf = io.BytesIO()
+            dl = MediaIoBaseDownload(buf, request)
+            done = False
+            while not done:
+                _, done = dl.next_chunk()
+            data = buf.getvalue()
+            return {
+                "readable":  False,   # no text content — "visuals" is what matters here
+                "content":   "",
+                "mime_type": mime,
+                "name":      name,
+                "link":      link,
+                "note":      "Image file — no text content. See 'visuals' for the image itself.",
+                "visuals":   prepare_standalone_image(data, mime, name),
+            }
+        except Exception as exc:
+            logger.warning("Image download failed for %s: %s", name, exc)
+            return _url_only(name, mime, link, f"Could not download image ({exc}). Open the link to view it.")
 
     # ── Native text types: download directly ─────────────────────────────────
     if mime in _NATIVE_TEXT_TYPES:
@@ -294,6 +485,7 @@ def read_drive_file(file_id: str) -> dict[str, Any]:
                 "name":      name,
                 "link":      link,
                 "note":      "",
+                "visuals":   [],
             }
         except Exception as exc:
             logger.warning("Download failed for %s: %s", name, exc)
@@ -347,6 +539,72 @@ def _extract_pptx_text(buf: io.BytesIO) -> str:
     return "\n\n".join(slide_sections).strip()
 
 
+def _extract_pdf_text(buf: io.BytesIO) -> str:
+    """
+    Extract readable text from a .pdf file already downloaded into `buf`.
+
+    Walks every page and pulls its extracted text. Returns the concatenated
+    text, one section per page. Returns "" if the PDF has no extractable
+    text (e.g. scanned/image-only pages) or if the file is corrupted/empty.
+    """
+    buf.seek(0)
+    reader = PdfReader(buf)
+    page_sections: list[str] = []
+
+    for idx, page in enumerate(reader.pages, start=1):
+        text = (page.extract_text() or "").strip()
+        if text:
+            page_sections.append(f"--- Page {idx} ---\n{text}")
+
+    return "\n\n".join(page_sections).strip()
+
+
+def _extract_docx_text(buf: io.BytesIO) -> str:
+    """
+    Extract readable text from a .docx file already downloaded into `buf`.
+
+    Walks the document and pulls text from:
+      - paragraphs (headings, body text)
+      - tables
+
+    Returns the concatenated text. Returns "" if the document has no
+    extractable text.
+    """
+    buf.seek(0)
+    doc = DocxDocument(buf)
+    lines: list[str] = []
+
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if text:
+            lines.append(text)
+
+    for table in doc.tables:
+        for row in table.rows:
+            cells = [cell.text.strip() for cell in row.cells]
+            if any(cells):
+                lines.append(" | ".join(cells))
+
+    return "\n".join(lines).strip()
+
+
+def _safe_extract_visuals(extractor, buf: io.BytesIO, name: str) -> list[dict]:
+    """
+    Run a visual extractor and never let it break text extraction.
+
+    Visual extraction is a strictly additive feature — if it raises for
+    any reason (a malformed embedded image, an unexpected shape structure,
+    etc.), the material's text content (already extracted successfully at
+    this point) must still be returned untouched. Only the image list is
+    lost, silently, with a log line for diagnosis.
+    """
+    try:
+        return extractor(buf)
+    except Exception as exc:
+        logger.warning("Visual extraction failed for %s: %s", name, exc)
+        return []
+
+
 def _url_only(name: str, mime: str, link: str, note: str) -> dict:
     return {
         "readable":  False,
@@ -355,12 +613,13 @@ def _url_only(name: str, mime: str, link: str, note: str) -> dict:
         "name":      name,
         "link":      link,
         "note":      note,
+        "visuals":   [],
     }
 
 
 def _url_only_note(mime: str) -> str:
-    if "pdf" in mime:
-        return "This is a PDF file. Text extraction requires an additional library. Open the link to read it."
+    if mime == "application/msword":
+        return "This is a legacy .doc file, which ClassPilot cannot parse. Modern .docx uploads are read automatically — open the link to view this one."
     if "powerpoint" in mime:
         return "This is a legacy .ppt file, which ClassPilot cannot parse. Modern .pptx uploads are read automatically — open the link to view this one."
     if "image" in mime:

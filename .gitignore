@@ -1,6 +1,29 @@
-.env
-token.json
-credentials.json
+# Development and environments
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Caches
+.pytest_cache/
+.mypy_cache/
+.tox/
+build/
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+
+# Secrets and environment variables
+.env
+token.json
+credentials.json
+*.pem
+*.key
+
+# IDEs and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

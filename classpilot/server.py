@@ -23,6 +23,7 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional
 
 from fastmcp import FastMCP
+from fastmcp.utilities.types import Image
 from pydantic import BaseModel, Field
 
 from .services import AppServices, build_services
@@ -100,6 +101,16 @@ class MaterialInfo(BaseModel):
     link: Optional[str] = None
 
 
+class VisualInfo(BaseModel):
+    """Metadata for an image returned alongside MaterialContent as a
+    separate ImageContent block — see get_material's return value."""
+    location: str = Field(description="e.g. 'Slide 5', 'Page 2'")
+    caption: str
+    diagram_only: bool = Field(
+        description="True if this page/slide had no other extractable text"
+    )
+
+
 class MaterialContent(BaseModel):
     id: str
     title: str
@@ -107,6 +118,15 @@ class MaterialContent(BaseModel):
     description: Optional[str] = None
     attachments: List[dict] = []
     link: Optional[str] = None
+    visuals: List[VisualInfo] = Field(
+        default=[],
+        description=(
+            "Images included below this JSON as separate image content blocks "
+            "(diagrams/charts/screenshots) — this list is just their captions/"
+            "locations. Empty when the material has no significant embedded "
+            "images, even if read_attachments=True."
+        ),
+    )
 
 
 class FileContent(BaseModel):
@@ -260,22 +280,45 @@ def list_materials(
         raise
 
 
+# Total cap across all attachments in a single get_material response — a
+# per-file cap already exists in visual_extractor.py, but a material could
+# have more than one drive attachment, so this bounds the combined payload.
+_MAX_VISUALS_PER_RESPONSE = 8
+
+# image/<subtype> -> the `format` string fastmcp.Image expects (its mimeType
+# is derived from this, e.g. format="jpeg" -> mimeType="image/jpeg").
+_MIME_TO_IMAGE_FORMAT = {
+    "image/png":  "png",
+    "image/jpeg": "jpeg",
+    "image/jpg":  "jpeg",
+    "image/gif":  "gif",
+    "image/webp": "webp",
+}
+
+
+def _image_format_from_mime(mime_type: str) -> str:
+    return _MIME_TO_IMAGE_FORMAT.get((mime_type or "").lower(), "png")
+
+
 @mcp.tool()
 def get_material(
     course_id: str,
     material_id: str,
     material_kind: str = "MATERIAL",
     read_attachments: bool = True,
-) -> MaterialContent:
+):
     """
-    Retrieve a material and read the content of its attached files.
+    Retrieve a material, read the content of its attached files, and
+    surface any important embedded diagrams/charts as images you can look
+    at directly.
 
     Args:
         course_id: The course ID from list_classes.
         material_id: The material ID from list_materials.
         material_kind: 'MATERIAL', 'ASSIGNMENT', or 'ANNOUNCEMENT'.
-        read_attachments: If True, attempt to read text content from
-                          Drive attachments. Set False to get metadata only.
+        read_attachments: If True, attempt to read text content (and
+                          visuals) from Drive attachments. Set False to
+                          get metadata only.
 
     What ClassPilot can read:
       ✅ Google Docs         — full text content
@@ -283,12 +326,22 @@ def get_material(
       ✅ Google Sheets       — data as CSV
       ✅ Plain text files    — full content
       ✅ Uploaded .pptx      — text from all slides, tables, and speaker notes
-      ⚠️ PDF files           — title and link only (open manually)
-      ⚠️ Legacy .ppt         — title and link only (open manually)
+      ✅ Uploaded .pdf       — text from all pages
+      ✅ Uploaded .docx      — text from paragraphs and tables
+      ⚠️ Legacy .ppt / .doc  — title and link only (open manually)
       ⚠️ YouTube / links     — URL only
 
-    The LLM can summarize, explain, or answer questions about any
-    content that was successfully extracted.
+    Visual content (diagrams, charts, graphs — NOT OCR):
+      For PPTX/PDF/DOCX attachments, important embedded images (diagram-only
+      slides/pages especially — e.g. an architecture diagram with no text
+      at all) are included as separate images below the JSON result, so you
+      can look at them directly. Small decorative images, icons, and
+      repeated logos/watermarks are filtered out automatically. Direct
+      image attachments (PNG/JPEG) are included the same way, in full.
+
+    Returns a list: [MaterialContent (JSON), then zero or more images].
+    MaterialContent.visuals lists each included image's location/caption;
+    the actual image data is the item(s) that follow it in the response.
     """
     svc_map = {
         "MATERIAL":     fetch_course_work_materials,
@@ -312,6 +365,9 @@ def get_material(
         raise
 
     enriched_attachments: list[dict] = []
+    visual_infos: List[VisualInfo] = []
+    images: List[Image] = []
+
     for att in item.get("attachments", []):
         entry = dict(att)
         if read_attachments and att.get("type") == "drive" and att.get("id"):
@@ -323,19 +379,34 @@ def get_material(
                     "mime_type": file_result["mime_type"],
                     "note":      file_result["note"],
                 })
+                for v in file_result.get("visuals", []):
+                    if len(images) >= _MAX_VISUALS_PER_RESPONSE:
+                        break
+                    visual_infos.append(VisualInfo(
+                        location=v["location"],
+                        caption=v["caption"],
+                        diagram_only=v["diagram_only"],
+                    ))
+                    images.append(Image(
+                        data=v["data"],
+                        format=_image_format_from_mime(v["mime_type"]),
+                    ))
             except Exception as exc:
                 logger.warning("Could not read attachment %s: %s", att.get("title"), exc)
                 entry.update({"readable": False, "content": "", "note": str(exc)})
         enriched_attachments.append(entry)
 
-    return MaterialContent(
+    material = MaterialContent(
         id=item["id"],
         title=item["title"],
         kind=item["kind"],
         description=item.get("description") or "",
         attachments=enriched_attachments,
         link=item.get("link"),
+        visuals=visual_infos,
     )
+
+    return [material, *images]
 
 
 @mcp.tool()
@@ -383,7 +454,6 @@ def get_upcoming_deadlines(within_hours: int = 168) -> List[DeadlineInfo]:
         within_hours: Only include deadlines within this many hours.
                       Default 168 = 7 days. Set to 0 for all future deadlines.
     """
-    from .classroom_client import classroom as _classroom
     now = datetime.now(tz=timezone.utc)
     deadlines = []
 
@@ -396,7 +466,10 @@ def get_upcoming_deadlines(within_hours: int = 168) -> List[DeadlineInfo]:
     for course in courses:
         cid = course["id"]
         try:
-            assignments = _classroom.list_assignments(cid, page_size=100)
+            # fetch_assignments pages through the full Classroom result set
+            # (see study_client._paginate), so deadlines are not silently
+            # truncated for courses with more than one page of coursework.
+            assignments = fetch_assignments(cid)
         except Exception:
             continue
         for a in assignments:

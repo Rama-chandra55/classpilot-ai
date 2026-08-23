@@ -73,6 +73,35 @@ def _mcp_factory(name="", **k):
 _fake_mcp_instance = _mcp_factory("ClassPilot AI")
 sys.modules["fastmcp"].FastMCP = _mcp_factory
 
+
+def _ensure_fake_mcp_active():
+    """
+    Re-assert this file's FastMCP stub and force a fresh import of
+    classpilot.server / classpilot.http_server.
+
+    Every test file in this suite stubs `fastmcp.FastMCP` independently at
+    module-import time, but pytest imports (collects) ALL test modules
+    before executing ANY test, and every file shares one process-wide
+    `sys.modules` cache. That means whichever test file happens to be
+    collected *last* leaves its own `FastMCP` stub sitting in
+    `sys.modules["fastmcp"]` when this file's tests actually run, and
+    `classpilot.server` (imported lazily, inside test methods) would bind
+    to that other file's stub instead of `_mcp_factory` — the class
+    identity these tests depend on.
+
+    Calling this at the start of every test that touches classpilot.server
+    or classpilot.http_server makes the outcome independent of collection/
+    execution order across the suite: it re-installs `_mcp_factory` and
+    drops any cached `classpilot.server` / `classpilot.http_server` module
+    so the next `import` re-executes their top-level `mcp = FastMCP(...)`
+    against the correct stub. `_mcp_factory` still returns the same
+    `_fake_mcp_instance` (keyed by server name), so `run_calls`/`_tools`
+    identity across a test's assertions is preserved.
+    """
+    sys.modules["fastmcp"].FastMCP = _mcp_factory
+    sys.modules.pop("classpilot.server", None)
+    sys.modules.pop("classpilot.http_server", None)
+
 sys.modules["google.auth.transport.requests"].Request = object
 sys.modules["google.oauth2.credentials"].Credentials = object
 sys.modules["google_auth_oauthlib.flow"].InstalledAppFlow = object
@@ -163,6 +192,9 @@ class TestHttpConfig(unittest.TestCase):
 class TestHttpServerWiring(unittest.TestCase):
     """http_server.py must reuse the existing mcp instance — no new tools."""
 
+    def setUp(self):
+        _ensure_fake_mcp_active()
+
     def test_http_server_imports_mcp_from_server_module(self):
         """http_server.mcp must be the same object as server.mcp."""
         import classpilot.server as srv
@@ -207,6 +239,7 @@ class TestHttpServerMain(unittest.TestCase):
     """http_server.main() calls mcp.run() with correct transport and kwargs."""
 
     def setUp(self):
+        _ensure_fake_mcp_active()
         # Reset run_calls before each test
         _fake_mcp_instance.run_calls.clear()
 
@@ -265,6 +298,9 @@ class TestHttpServerMain(unittest.TestCase):
 # ═════════════════════════════════════════════════════════════════════════════
 class TestNoCredentialExposure(unittest.TestCase):
     """Verify that sensitive config values are not exposed as MCP tools."""
+
+    def setUp(self):
+        _ensure_fake_mcp_active()
 
     def test_no_tool_named_get_config(self):
         import classpilot.server as srv

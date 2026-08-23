@@ -28,6 +28,7 @@ _stub_module(
     "anthropic",
     "dotenv",
     "fastmcp",
+    "fastmcp.utilities.types",
     "google.auth.transport.requests",
     "google.oauth2.credentials",
     "google_auth_oauthlib.flow",
@@ -47,6 +48,19 @@ class _FastMCP:
     def tool(self): return lambda f: f
 
 sys.modules["fastmcp"].FastMCP = _FastMCP
+
+# fastmcp.utilities.types.Image stub — mirrors the real fastmcp.Image helper
+# closely enough for classpilot.server to import and construct it; tests
+# that care about real MCP-protocol image conversion use the real fastmcp
+# package directly (see tests/test_visual_extractor.py), not this stub.
+class _FakeImage:
+    def __init__(self, path=None, data=None, format=None, annotations=None):
+        self.path = path
+        self.data = data
+        self.format = format
+        self.mimeType = f"image/{format}" if format else "image/png"
+
+sys.modules["fastmcp.utilities.types"].Image = _FakeImage
 
 # Google API stubs
 sys.modules["google.auth.transport.requests"].Request = object

@@ -5,9 +5,10 @@ Runs the same FastMCP server as server.py (stdio) but over
 Streamable HTTP so remote clients such as ChatGPT custom connectors
 can reach it over a network.
 
-The same `mcp` instance and all 7 tools are reused verbatim —
-no logic is duplicated here. This file only starts uvicorn with the
-correct transport and binding.
+The same `mcp` instance and all 8 registered tools (5 Study Assistant
+tools + 3 Watcher tools — see server.py) are reused verbatim; no logic
+is duplicated here. This file only starts uvicorn with the correct
+transport and binding.
 
 Transport: streamable-http  (MCP spec 2024-11-05, supported by FastMCP ≥ 3.0)
 Default endpoint: http://127.0.0.1:8000/mcp
