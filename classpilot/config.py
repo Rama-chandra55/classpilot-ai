@@ -35,9 +35,28 @@ class ClassPilotConfig:
     # --- Deadline alert offsets (minutes before due time) ---
     deadline_alert_offsets_minutes: tuple = (24 * 60, 6 * 60, 60, 15)
 
-    # --- State storage ---
+    # --- State storage (SQLite — watcher/deadline dedup cache; unrelated to
+    #     the new Postgres-backed user/credential store below) ---
     state_db_path: str = field(
         default_factory=lambda: os.getenv("STATE_DB_PATH", "classpilot_state.db")
+    )
+
+    # --- Multi-user persistence foundation (Phase 1) ---
+    # Postgres holds `users` and their encrypted Google OAuth credentials.
+    # Not yet wired into the live single-user auth flow (vendor auth.py /
+    # token.json) — this is the storage substrate Phase 2's web OAuth flow
+    # will write to and read from.
+    database_url: str = field(
+        default_factory=lambda: os.getenv(
+            "DATABASE_URL", "postgresql://classpilot:classpilot@localhost:5432/classpilot"
+        )
+    )
+    # Fernet key (44-char urlsafe-base64 string from Fernet.generate_key()).
+    # No default — classpilot/crypto.py raises a clear error if a caller
+    # actually tries to encrypt/decrypt without one configured, rather than
+    # silently using a weak or predictable key.
+    token_encryption_key: str = field(
+        default_factory=lambda: os.getenv("TOKEN_ENCRYPTION_KEY", "")
     )
 
     # --- Notifications ---

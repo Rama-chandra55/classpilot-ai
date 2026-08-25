@@ -133,6 +133,60 @@ in a single API response page are not silently truncated.
 - **Pagination:** working across all Classroom list reads.
 - **Assignment Watcher (3 tools):** working, carried over unmodified in behavior from the original project.
 - **Assignment submission:** intentionally removed from the MCP surface. The underlying vendor Classroom API code and `classpilot/submission_flow.py` still exist in the repo (and are still covered by tests) but are **not** registered as MCP tools in `classpilot/server.py`, and there are no plans to re-expose them.
+- **Multi-user persistence foundation (Phase 1 of the multi-user roadmap):** working, tested — Postgres-backed `users` + encrypted Google-credential storage exist and are covered by real integration tests, but are **not yet wired into the live auth flow**. The app still runs single-user via `token.json` today; see "Multi-user roadmap" below.
+
+---
+
+## Multi-user roadmap
+
+ClassPilot AI is being extended from a single-user tool (one `token.json`)
+into a multi-user MCP server every student can connect their own Google
+account to. This is being built in phases so each one can be reviewed and
+tested independently rather than landing as one large, risky change.
+
+**Phase 1 (done) — Multi-user persistence foundation**
+- `classpilot/db.py` — Postgres connection pool + schema management
+- `classpilot/crypto.py` — Fernet encryption for stored Google refresh tokens
+- `classpilot/user_store.py` — `users` + `google_oauth_credentials` CRUD
+- `classpilot/state_store.py` — additive `user_id` column/param (schema readiness; still defaults to a single tenant today)
+- Google OAuth scope audit — see "Google OAuth scopes" below
+
+This phase is storage/schema only — nothing above is called by the live
+app yet. `token.json` + the single global auth singleton in
+`vendor_classroom_suite_mcp` are still what actually authenticates every
+request today.
+
+**Not yet started:**
+- **Phase 2** — thread real per-user identity through `study_client.py`/`server.py`'s call path and the watcher's polling loop (the biggest, highest-risk step)
+- **Phase 3** — replace the desktop `InstalledAppFlow` with a real web OAuth flow so students authorize via browser, and add MCP-facing OAuth 2.1 so Claude/Cursor/ChatGPT can each connect their own student
+- **Phase 4** — production deployment (real TLS host, managed Postgres, secrets manager, Google App Verification)
+
+---
+
+## Google OAuth scopes
+
+The exact set of scopes ClassPilot requests, and why — audited against
+what the codebase actually calls (not assumed):
+
+| Scope | Used for |
+|---|---|
+| `classroom.courses.readonly` | `list_classes` |
+| `classroom.coursework.me` | `get_upcoming_deadlines`, assignment listing |
+| `classroom.courseworkmaterials` | `list_materials` |
+| `classroom.announcements` | `list_materials` (announcements) |
+| `classroom.topics.readonly` | `list_modules` |
+| `drive.readonly` | `get_material` reading PPTX/PDF/DOCX/image attachments and exporting Google Docs/Slides/Sheets |
+
+**Deliberately not requested** (removed from the vendored client's
+broader default, since nothing in the exposed tool surface uses them):
+- `classroom.coursework.students` — only relevant to the vendored, unexposed `list_submissions()`, which needs teacher-level visibility into every student's submissions; not applicable to a student-facing app reading its own coursework.
+- `classroom.rosters.readonly` — no roster endpoint is called anywhere in this codebase.
+- `documents` (Google Docs API) — Google Docs content is read via Drive's `export_media`, never via the Docs API itself.
+- Full `drive` (read/write) — every active Drive call is read-only; `drive.readonly` covers `.get()`, `.get_media()`, and `.export_media()`.
+
+If a future phase re-exposes the vendored submission-upload flow
+(`classpilot/submission_flow.py`), it will need its own broader scope back
+— deliberately, not by leaving it granted unused today.
 
 ---
 
@@ -146,13 +200,19 @@ classpilot/
   visual_extractor.py     Diagram/chart/image extraction + significance filtering for
                           PPTX/PDF/DOCX and direct image attachments (not OCR — selects and
                           hands over raw image bytes for the connected AI to look at)
-  classroom_client.py     Thin wrapper that re-exports the vendor package and extends its
-                          OAuth scopes (courseworkmaterials, announcements, topics) without
+  classroom_client.py     Thin wrapper that re-exports the vendor package, curates its
+                          OAuth scope list (see "Google OAuth scopes" above), without
                           modifying vendor code
+  db.py                   Postgres connection pool + schema management (Phase 1)
+  crypto.py                Fernet encryption for stored Google refresh tokens (Phase 1)
+  user_store.py            users + google_oauth_credentials CRUD (Phase 1; not yet wired
+                          into the live auth flow — see "Multi-user roadmap" above)
   submission_flow.py      Two-step submission flow (attach → confirm → turn in) — kept for the
                           watcher's internal use in tests; NOT exposed as an MCP tool
   watcher.py, deadline_scheduler.py, scheduler.py, state_store.py
                           Background polling, deduplication, and deadline-reminder scheduling
+                          (state_store.py: SQLite, now with a schema-ready but not-yet-wired
+                          user_id column/param — see "Multi-user roadmap" above)
   notification_service.py, notifier/
                           LLM-generated notification text + delivery (email today)
   llm/                    Pluggable LLM providers (Gemini, Groq, Anthropic)
@@ -197,17 +257,63 @@ data directly.
    # fill in LLM_API_KEY (Gemini or Groq) and, if you want email
    # notifications from the watcher, the SMTP_* variables.
    ```
-4. **First run — authenticate**
+4. **Database setup (Phase 1 — optional unless you're working on the
+   multi-user persistence code itself)**
+
+   Not required to run the app today — `token.json` still drives the live
+   single-user auth flow. This sets up the Postgres-backed `users`/
+   credential storage the multi-user roadmap will wire in later, and is
+   needed to run `tests/test_user_store.py`'s integration tests.
+
+   ```bash
+   # Install Postgres locally (Ubuntu/Debian shown; use your platform's
+   # package manager / a managed instance otherwise)
+   sudo apt-get install -y postgresql postgresql-contrib
+   sudo service postgresql start
+
+   # Create a role and two databases — `classpilot` for normal dev use,
+   # `classpilot_test` kept separate so running tests never touches dev data
+   sudo -u postgres psql -c "CREATE ROLE classpilot WITH LOGIN PASSWORD 'classpilot';"
+   sudo -u postgres psql -c "CREATE DATABASE classpilot OWNER classpilot;"
+   sudo -u postgres psql -c "CREATE DATABASE classpilot_test OWNER classpilot;"
+
+   # Generate an encryption key for stored Google refresh tokens —
+   # use a DIFFERENT key per environment, never commit a real one
+   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+   ```
+
+   Add the resulting values to `.env`:
+   ```
+   DATABASE_URL=postgresql://classpilot:classpilot@localhost:5432/classpilot
+   TOKEN_ENCRYPTION_KEY=<the key printed above>
+   ```
+
+   Then create the tables (idempotent — safe to run anytime, including on
+   every app startup):
+   ```bash
+   python -c "from classpilot.db import init_schema; init_schema()"
+   ```
+
+   To run the Postgres-backed test suite against the separate test
+   database instead of your dev one:
+   ```bash
+   TEST_DATABASE_URL=postgresql://classpilot:classpilot@localhost:5432/classpilot_test \
+     python -m pytest tests/test_user_store.py -v
+   ```
+
+5. **First run — authenticate**
    ```bash
    classpilot-ai-mcp
    ```
    A browser window opens for Google login on first run; a token is saved
    to `GOOGLE_TOKEN_PATH` (default `token.json`) for future runs.
 
-   > If you've used an older version of this project before the study
-   > scopes (`courseworkmaterials`, `announcements`, `topics.readonly`)
-   > were added, delete `token.json` once and re-authenticate so Google
-   > issues a token that includes them.
+   > If you've used an older version of this project before the current
+   > scope set (see "Google OAuth scopes" above) was adopted, delete
+   > `token.json` once and re-authenticate so Google issues a token that
+   > matches exactly — old tokens authorized for now-dropped scopes
+   > (full `drive`, `documents`, etc.) keep working but are broader than
+   > what the app requests today, and won't automatically narrow on their own.
 
 ### Running modes
 
@@ -240,6 +346,8 @@ data directly.
 | `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `GOOGLE_CREDENTIALS_PATH` | `credentials.json` | Google OAuth credentials |
 | `GOOGLE_TOKEN_PATH` | `token.json` | Saved auth token |
+| `DATABASE_URL` | `postgresql://classpilot:classpilot@localhost:5432/classpilot` | Postgres connection string for the multi-user persistence foundation (Phase 1) — not required for today's single-user flow, see "Database setup" above |
+| `TOKEN_ENCRYPTION_KEY` | — | Fernet key encrypting stored Google refresh tokens; required only by code that actually calls `classpilot.crypto`/`classpilot.user_store`, not by the app's current live auth path |
 
 ---
 
@@ -258,6 +366,18 @@ to build tiny in-memory fixture files — no external files or network
 access needed there either. A couple of PDF-fixture tests additionally
 use `reportlab` (not a runtime dependency) to generate test PDFs; they
 skip automatically if it isn't installed.
+
+**One exception:** `tests/test_user_store.py` runs real integration tests
+against a live Postgres database (see "Database setup" above) — since the
+whole point of that module is proving the schema/encryption/CRUD actually
+work, not just that the SQL looks plausible. It skips gracefully (not a
+failure) if no Postgres is reachable, so `pytest tests/` still passes
+cleanly without one set up:
+
+```bash
+# without Postgres running: 274 passed, 21 skipped
+# with Postgres running:    295 passed
+```
 
 ---
 
