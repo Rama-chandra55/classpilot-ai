@@ -1,0 +1,32 @@
+# Sensitive credentials - NEVER commit these
+.env
+.env.example
+google_web_credentials.json
+credentials.json
+token.json
+classpilot_state.db
+
+# Virtual environment
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Vendor
+vendor_classroom_suite_mcp/.env
+vendor_classroom_suite_mcp/.env.example

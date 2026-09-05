@@ -1,0 +1,46 @@
+[project]
+name = "classroom-suite-mcp"
+version = "1.0.0"
+description = "Unified MCP server for Google Classroom, Drive, and Docs - seamlessly integrate education tools with AI assistants"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+authors = [
+    {name = "anasdevai", email = "anasahmedahmed378@gmail.com"}
+]
+keywords = ["mcp", "google-classroom", "google-drive", "google-docs", "ai", "education", "automation", "model-context-protocol"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Education",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Education",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+    "fastmcp>=2.0.0",
+    "google-auth>=2.0.0",
+    "google-auth-oauthlib>=1.0.0",
+    "google-api-python-client>=2.0.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/anasdevai/classroom-suite-mcp"
+Repository = "https://github.com/anasdevai/classroom-suite-mcp"
+Documentation = "https://github.com/anasdevai/classroom-suite-mcp#readme"
+Issues = "https://github.com/anasdevai/classroom-suite-mcp/issues"
+
+[project.scripts]
+classroom-suite-mcp = "classroom_suite_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/classroom_suite_mcp"]
