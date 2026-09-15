@@ -5,24 +5,39 @@ Tracks which assignments we've already seen/notified about, and (for Feature 3
 later) which deadline reminders have already fired - so restarts and repeated
 polling never produce duplicate notifications.
 
-Multi-user readiness (Phase 1):
-  Every method now accepts an optional `user_id` parameter, and both tables
-  carry a `user_id` column, so this schema is ready for the watcher to
-  become multi-user-aware in a later phase. Nothing here is wired up to
-  real per-user identity yet — `watcher.py` and `deadline_scheduler.py`
-  don't pass `user_id` today, so every call falls back to DEFAULT_USER_ID
-  and behavior is byte-for-byte identical to before this change. This is
-  intentionally schema/API readiness only, not a functional multi-tenancy
-  change — see the Phase 1 architecture notes for why threading real
-  identity through the watcher's polling loop is deferred to the phase
-  that actually builds the OAuth layer supplying that identity.
+Multi-user isolation (Phase 3):
+  known_assignments and sent_reminders are now keyed by
+  (user_id, course_id, assignment_id[, offset_minutes]) — user_id is part
+  of the PRIMARY KEY, not just a plain column. This matters concretely:
+  two students enrolled in the SAME course see the SAME course_id and the
+  SAME assignment_id for a shared assignment (Classroom IDs aren't
+  per-student). Under the old (course_id, assignment_id)-only key, a
+  second student's poll would silently overwrite the first student's row
+  (`ON CONFLICT(course_id, assignment_id) DO UPDATE SET user_id =
+  excluded.user_id, ...`), and a second student's reminder-sent marker
+  could never be recorded at all if the first student's row already
+  occupied that key (`INSERT OR IGNORE` blocked by the PK collision) —
+  causing duplicate "new assignment" notifications for one student and
+  endlessly repeated reminders for the other. Widening the key makes this
+  physically impossible: every row is uniquely addressed per student.
 
-  This table deliberately stays on SQLite in Phase 1 (unlike the new
-  users/google_oauth_credentials tables in classpilot/db.py, which are
+  Watchers/schedulers are user-scoped as of Phase 3 (see watcher.py,
+  deadline_scheduler.py, services.py) and now pass real user_id values
+  here — this is no longer schema-readiness-only, as it was in Phase 1.
+
+  Migration: see _migrate_add_user_id_column (pre-Phase-1 databases that
+  predate the user_id column entirely) and _migrate_widen_primary_key
+  (Phase 1/2 databases that have the column but not yet in the PRIMARY
+  KEY). Both are idempotent — safe to run on every process startup — and
+  detected via PRAGMA table_info rather than a version flag, so an
+  interrupted/partial upgrade can't leave the schema in an ambiguous
+  state.
+
+  This table deliberately stays on SQLite (unlike the users/
+  google_oauth_credentials tables in classpilot/db.py, which are
   Postgres) — it's low-sensitivity operational dedup cache, not identity
-  or credential data, and migrating it now (before the watcher is actually
-  multi-user-aware) would add real risk to already-working code for no
-  present benefit. Revisit this alongside the watcher rework.
+  or credential data, and there's no present need to add a second
+  database dependency just for this.
 """
 
 import json
@@ -35,9 +50,10 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-# Used when a caller doesn't pass user_id — i.e. every call site today.
-# Keeps today's single-user behavior byte-for-byte unchanged while the
-# schema itself is already tenant-isolation-ready.
+# Used only as an explicit opt-in default for callers that genuinely have
+# no per-user context (e.g. a quick manual/test invocation) — every real
+# call site in watcher.py/deadline_scheduler.py passes a real user_id as
+# of Phase 3.
 DEFAULT_USER_ID = "default"
 
 _SCHEMA = """
@@ -50,7 +66,7 @@ CREATE TABLE IF NOT EXISTS known_assignments (
     due_time_json   TEXT,
     first_seen_at   TEXT DEFAULT CURRENT_TIMESTAMP,
     last_updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (course_id, assignment_id)
+    PRIMARY KEY (user_id, course_id, assignment_id)
 );
 
 CREATE TABLE IF NOT EXISTS sent_reminders (
@@ -59,7 +75,7 @@ CREATE TABLE IF NOT EXISTS sent_reminders (
     assignment_id   TEXT NOT NULL,
     offset_minutes  INTEGER NOT NULL,
     sent_at         TEXT DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (course_id, assignment_id, offset_minutes)
+    PRIMARY KEY (user_id, course_id, assignment_id, offset_minutes)
 );
 """
 
@@ -90,29 +106,33 @@ class StateStore:
 
     def _init_schema(self) -> None:
         with self._lock, self._connect() as conn:
+            # Order matters: a database old enough to be missing user_id
+            # entirely must get the column added before we can consider
+            # widening the primary key to include it.
             self._migrate_add_user_id_column(conn, "known_assignments")
             self._migrate_add_user_id_column(conn, "sent_reminders")
+            self._migrate_widen_primary_key(
+                conn, "known_assignments",
+                new_pk=("user_id", "course_id", "assignment_id"),
+                columns=("user_id", "course_id", "assignment_id", "title",
+                         "due_date_json", "due_time_json", "first_seen_at", "last_updated_at"),
+            )
+            self._migrate_widen_primary_key(
+                conn, "sent_reminders",
+                new_pk=("user_id", "course_id", "assignment_id", "offset_minutes"),
+                columns=("user_id", "course_id", "assignment_id", "offset_minutes", "sent_at"),
+            )
             conn.executescript(_SCHEMA)
         logger.debug("State store schema ready at %s", self.db_path)
 
     @staticmethod
     def _migrate_add_user_id_column(conn: sqlite3.Connection, table: str) -> None:
         """
-        Add a `user_id` column to a pre-existing table that predates it
-        (i.e. a classpilot_state.db from before this change), so upgrading
-        doesn't break on "no such column: user_id".
-
-        `user_id` is a plain, non-key column in Phase 1 — the PRIMARY KEY
-        stays (course_id, assignment_id) on both migrated and fresh
-        tables, unchanged from before this column existed. It doesn't need
-        to be part of the key yet because nothing writes a second, real
-        user_id here yet: `watcher.py`/`deadline_scheduler.py` don't pass
-        `user_id` today, so every row is DEFAULT_USER_ID, and the existing
-        key already correctly prevents duplicates for that single tenant.
-        Widening the key to (user_id, course_id, assignment_id) becomes
-        necessary once the watcher itself becomes multi-user aware in a
-        later phase — do that as part of that change, with real thought
-        about migrating any multi-row data that exists by then.
+        Add a `user_id` column to a pre-Phase-1 table that predates it
+        entirely, so upgrading doesn't break on "no such column: user_id".
+        Every existing row becomes DEFAULT_USER_ID, matching the only
+        identity that could possibly have written it (this table's schema
+        had no user dimension at all before this migration existed).
         """
         cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if not cols:
@@ -122,6 +142,55 @@ class StateStore:
                 f"ALTER TABLE {table} ADD COLUMN user_id TEXT NOT NULL DEFAULT '{DEFAULT_USER_ID}'"
             )
             logger.info("Migrated existing '%s' table: added user_id column", table)
+
+    @staticmethod
+    def _migrate_widen_primary_key(
+        conn: sqlite3.Connection, table: str, new_pk: tuple[str, ...], columns: tuple[str, ...],
+    ) -> None:
+        """
+        Widen `table`'s PRIMARY KEY to include user_id (Phase 3), if it
+        doesn't already. Detected via PRAGMA table_info's `pk` column
+        (0 = not part of the key; 1, 2, 3... = position within it) rather
+        than a stored schema-version flag, so this is self-verifying and
+        safe to run on every startup — an interrupted upgrade just gets
+        retried, not skipped.
+
+        SQLite has no ALTER TABLE for primary keys, so this rebuilds the
+        table: create a correctly-keyed replacement, copy every row into
+        it, drop the old table, rename the replacement into place — done
+        as one atomic operation within the caller's transaction. This is
+        lossless and collision-free by construction: every existing row
+        was already unique under the OLD (narrower) key, so it stays
+        unique under the new, WIDER key too — widening a key can only
+        ever preserve uniqueness among rows that already satisfied a
+        subset of it, never create a new collision.
+        """
+        info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        if not info:
+            return  # table doesn't exist yet — _SCHEMA's CREATE TABLE will make it fresh, correctly
+
+        current_pk_cols = {row[1] for row in info if row[5] > 0}  # row[5] is the `pk` field
+        if current_pk_cols == set(new_pk):
+            return  # already widened — idempotent no-op
+
+        tmp_table = f"{table}__migrating"
+        conn.execute(f"DROP TABLE IF EXISTS {tmp_table}")  # in case a prior attempt was interrupted
+
+        # Build the replacement table's DDL by re-using _SCHEMA's own
+        # column definitions for this table, but with the NEW primary key
+        # — extracted at call time so this stays a single source of truth
+        # rather than a second, hand-copied CREATE TABLE statement.
+        create_stmt = _extract_create_table(table, new_pk)
+        conn.execute(create_stmt.replace(f"TABLE IF NOT EXISTS {table}", f"TABLE {tmp_table}"))
+
+        col_list = ", ".join(columns)
+        conn.execute(f"INSERT INTO {tmp_table} ({col_list}) SELECT {col_list} FROM {table}")
+        conn.execute(f"DROP TABLE {table}")
+        conn.execute(f"ALTER TABLE {tmp_table} RENAME TO {table}")
+        logger.info(
+            "Migrated existing '%s' table: widened PRIMARY KEY to include user_id (%s)",
+            table, ", ".join(new_pk),
+        )
 
     # ---------- Assignment tracking (Feature 1) ----------
 
@@ -150,8 +219,7 @@ class StateStore:
                 INSERT INTO known_assignments
                     (user_id, course_id, assignment_id, title, due_date_json, due_time_json)
                 VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(course_id, assignment_id) DO UPDATE SET
-                    user_id = excluded.user_id,
+                ON CONFLICT(user_id, course_id, assignment_id) DO UPDATE SET
                     title = excluded.title,
                     due_date_json = excluded.due_date_json,
                     due_time_json = excluded.due_time_json,
@@ -193,4 +261,25 @@ class StateStore:
                 """,
                 (user_id, course_id, assignment_id, offset_minutes),
             )
+
+
+def _extract_create_table(table: str, new_pk: tuple[str, ...]) -> str:
+    """
+    Pull `table`'s CREATE TABLE statement out of the module-level _SCHEMA
+    (the single source of truth for both tables' column definitions) and
+    confirm its PRIMARY KEY matches `new_pk` — used by
+    _migrate_widen_primary_key so the migration's replacement table can
+    never drift out of sync with the real, current schema definition.
+    """
+    marker = f"CREATE TABLE IF NOT EXISTS {table} ("
+    start = _SCHEMA.index(marker)
+    end = _SCHEMA.index(");", start) + 2
+    stmt = _SCHEMA[start:end]
+    expected_pk = f"PRIMARY KEY ({', '.join(new_pk)})"
+    assert expected_pk in stmt, (
+        f"_SCHEMA's {table} definition doesn't match the requested PK {new_pk} — "
+        "update _SCHEMA and this migration together."
+    )
+    return stmt
+
 

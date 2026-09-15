@@ -128,6 +128,34 @@ def _fake_web_client_config():
 
 
 class GoogleOAuthTestCase(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Re-bind this module's globals to whatever classpilot.google_oauth
+        # object is CURRENTLY in sys.modules, at execution time.
+        #
+        # Other test files (tests/test_multiuser_isolation.py,
+        # tests/test_credential_failure_modes.py) legitimately pop and
+        # fresh-import classpilot.google_oauth in their own setUpClass to
+        # escape a third file's google.* stubs. When they do, this file's
+        # names — bound by the `from classpilot.google_oauth import ...`
+        # at collection time — are left pointing at a discarded module
+        # object, so `patch("classpilot.google_oauth._load_web_client_config")`
+        # (which resolves through sys.modules) patches a DIFFERENT object
+        # than the stale bare names actually call into. Re-binding here
+        # makes this file order-independent without requiring any other
+        # file to change.
+        import classpilot.google_oauth as _go
+        globals().update({
+            name: getattr(_go, name)
+            for name in (
+                "ExchangedIdentity", "GoogleOAuthError", "build_authorization_url",
+                "complete_authorization", "exchange_code_for_user",
+                "get_authorized_credentials", "get_web_flow_scopes",
+                "clear_credentials_cache", "_persist_credentials",
+                "_verify_required_scopes_present",
+            )
+        })
+
     def setUp(self):
         clear_credentials_cache()
         self.patcher = patch(

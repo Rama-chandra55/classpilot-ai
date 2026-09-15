@@ -83,6 +83,16 @@ class ClassPilotConfig:
         default_factory=lambda: int(os.getenv("OAUTH_WEB_PORT", "8090"))
     )
 
+    # --- Phase 3: request identity resolution (dev/local placeholder) ---
+    # The PostgreSQL `users.id` (UUID) that resolve_identity() returns for
+    # every MCP tool call, until Phase 4 replaces it with real
+    # per-request identity from an authenticated MCP session. Obtain this
+    # value by connecting an account via `classpilot-ai-oauth` and reading
+    # its id from the `users` table.
+    classpilot_dev_user_id: str = field(
+        default_factory=lambda: os.getenv("CLASSPILOT_DEV_USER_ID", "")
+    )
+
     # --- Notifications ---
     notifier_backend: str = field(default_factory=lambda: os.getenv("NOTIFIER_BACKEND", "email"))
     smtp_host: str = field(default_factory=lambda: os.getenv("SMTP_HOST", ""))

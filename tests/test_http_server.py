@@ -40,7 +40,7 @@ def _stub(*names):
 
 _stub(
     "anthropic", "dotenv", "fastmcp",
-    "google.auth.transport.requests", "google.oauth2.credentials",
+    "google.auth.transport.requests", "google.oauth2.credentials", "google.oauth2.id_token",
     "google_auth_oauthlib.flow",
     "googleapiclient.discovery", "googleapiclient.http", "googleapiclient.errors",
     "apscheduler.schedulers.blocking", "apscheduler.schedulers.background",
@@ -104,7 +104,9 @@ def _ensure_fake_mcp_active():
 
 sys.modules["google.auth.transport.requests"].Request = object
 sys.modules["google.oauth2.credentials"].Credentials = object
+sys.modules["google.oauth2.id_token"].verify_oauth2_token = lambda *a, **k: {}
 sys.modules["google_auth_oauthlib.flow"].InstalledAppFlow = object
+sys.modules["google_auth_oauthlib.flow"].Flow = object
 sys.modules["googleapiclient.discovery"].build = lambda *a, **k: None
 sys.modules["googleapiclient.discovery"].Resource = object
 sys.modules["googleapiclient.http"].MediaIoBaseUpload = object

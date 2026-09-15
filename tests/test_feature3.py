@@ -321,14 +321,12 @@ class TestEndToEndFeature3(unittest.TestCase):
 
     def test_new_assignment_schedules_reminders(self):
         import classpilot.watcher as wm
-        wm.classroom = types.SimpleNamespace(
-            list_courses=lambda page_size=20, course_states=None: [{"id":"c1","name":"DBMS"}],
-            list_assignments=lambda course_id, page_size=20: [{
-                "id":"a1","title":"DBMS HW1",
-                "due_date":{"year":2027,"month":1,"day":1},
-                "due_time":{"hours":23,"minutes":0,"seconds":0},
-            }],
-        )
+        wm.study_client.fetch_courses = lambda credentials, page_size=100: [{"id": "c1", "name": "DBMS"}]
+        wm.study_client.fetch_assignments = lambda credentials, course_id, topic_id=None: [{
+            "id":"a1","title":"DBMS HW1",
+            "due_date":{"year":2027,"month":1,"day":1},
+            "due_time":{"hours":23,"minutes":0,"seconds":0},
+        }]
         from classpilot.watcher import AssignmentWatcher
         from classpilot.main import build_handle_event
 
@@ -343,7 +341,7 @@ class TestEndToEndFeature3(unittest.TestCase):
         mock_ap.remove_job = MagicMock(side_effect=Exception("not found"))
         ds.attach_scheduler(mock_ap)
 
-        watcher = AssignmentWatcher(store, on_event=build_handle_event(svc, ds))
+        watcher = AssignmentWatcher(store, on_event=build_handle_event(svc, ds), credentials="fake-creds")
         watcher.check_once()
 
         # Feature 2: new-assignment notification fired
@@ -360,10 +358,8 @@ class TestEndToEndFeature3(unittest.TestCase):
             "due_time":{"hours":23,"minutes":0,"seconds":0},
         }]
         import classpilot.watcher as wm
-        wm.classroom = types.SimpleNamespace(
-            list_courses=lambda page_size=20, course_states=None: [{"id":"c1","name":"DBMS"}],
-            list_assignments=lambda course_id, page_size=20: assignments,
-        )
+        wm.study_client.fetch_courses = lambda credentials, page_size=100: [{"id": "c1", "name": "DBMS"}]
+        wm.study_client.fetch_assignments = lambda credentials, course_id, topic_id=None: assignments
         from classpilot.watcher import AssignmentWatcher
         from classpilot.main import build_handle_event
 
@@ -377,7 +373,7 @@ class TestEndToEndFeature3(unittest.TestCase):
         mock_ap.remove_job = MagicMock()
         ds.attach_scheduler(mock_ap)
 
-        watcher = AssignmentWatcher(store, on_event=build_handle_event(svc, ds))
+        watcher = AssignmentWatcher(store, on_event=build_handle_event(svc, ds), credentials="fake-creds")
         watcher.check_once()             # detects new → 2 jobs added
         first_add_count = mock_ap.add_job.call_count
 

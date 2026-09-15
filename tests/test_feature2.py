@@ -80,10 +80,8 @@ class FakeNotifier(Notifier):
 
 def _make_watcher(assignments):
     import classpilot.watcher as wm
-    wm.classroom = types.SimpleNamespace(
-        list_courses=lambda page_size=20, course_states=None: [{"id": "c1", "name": "DBMS"}],
-        list_assignments=lambda course_id, page_size=20: assignments,
-    )
+    wm.study_client.fetch_courses = lambda credentials, page_size=100: [{"id": "c1", "name": "DBMS"}]
+    wm.study_client.fetch_assignments = lambda credentials, course_id, topic_id=None: assignments
     db = tempfile.mktemp(suffix=".db")
     return StateStore(db), db
 
@@ -299,7 +297,7 @@ class TestEndToEnd(unittest.TestCase):
         store, db = _make_watcher(assignments)
         llm, n = FakeLLM(), FakeNotifier()
         svc = NotificationService(llm, n)
-        watcher = AssignmentWatcher(store, on_event=build_handle_event(svc, NullDeadlineScheduler()))
+        watcher = AssignmentWatcher(store, on_event=build_handle_event(svc, NullDeadlineScheduler()), credentials="fake-creds")
         watcher.check_once()
         self.assertEqual(len(llm.calls), 1)
         self.assertEqual(llm.calls[0][0], EventType.NEW_ASSIGNMENT)
@@ -312,7 +310,7 @@ class TestEndToEnd(unittest.TestCase):
         store, db = _make_watcher(assignments)
         llm, n = FakeLLM(), FakeNotifier()
         svc = NotificationService(llm, n)
-        watcher = AssignmentWatcher(store, on_event=build_handle_event(svc, NullDeadlineScheduler()))
+        watcher = AssignmentWatcher(store, on_event=build_handle_event(svc, NullDeadlineScheduler()), credentials="fake-creds")
         watcher.check_once()
         watcher.check_once()
         watcher.check_once()
@@ -325,7 +323,7 @@ class TestEndToEnd(unittest.TestCase):
         store, db = _make_watcher(assignments)
         llm, n = FakeLLM(), FakeNotifier()
         svc = NotificationService(llm, n)
-        watcher = AssignmentWatcher(store, on_event=build_handle_event(svc, NullDeadlineScheduler()))
+        watcher = AssignmentWatcher(store, on_event=build_handle_event(svc, NullDeadlineScheduler()), credentials="fake-creds")
         watcher.check_once()
         calls_after_first = len(llm.calls)
         assignments[0]["due_date"] = {"year": 2026, "month": 8, "day": 1}
@@ -343,7 +341,7 @@ class TestEndToEnd(unittest.TestCase):
         store, db = _make_watcher(assignments)
         llm, n = FakeLLM(), FakeNotifier()
         svc = NotificationService(llm, n)
-        watcher = AssignmentWatcher(store, on_event=build_handle_event(svc, NullDeadlineScheduler()))
+        watcher = AssignmentWatcher(store, on_event=build_handle_event(svc, NullDeadlineScheduler()), credentials="fake-creds")
         watcher.check_once()
         self.assertEqual(len(llm.calls), 3)
         self.assertEqual(len(n.sent), 3)
@@ -359,7 +357,7 @@ class TestEndToEnd(unittest.TestCase):
         store, db = _make_watcher(assignments)
         llm, n = FakeLLM(), FakeNotifier()
         svc = NotificationService(llm, n)
-        watcher = AssignmentWatcher(store, on_event=build_handle_event(svc, NullDeadlineScheduler()))
+        watcher = AssignmentWatcher(store, on_event=build_handle_event(svc, NullDeadlineScheduler()), credentials="fake-creds")
         watcher.check_once()
         self.assertEqual(len(llm.calls), 1)
 
@@ -367,7 +365,7 @@ class TestEndToEnd(unittest.TestCase):
         store2 = StateStore(db)
         llm2, n2 = FakeLLM(), FakeNotifier()
         svc2 = NotificationService(llm2, n2)
-        watcher2 = AssignmentWatcher(store2, on_event=build_handle_event(svc2, NullDeadlineScheduler()))
+        watcher2 = AssignmentWatcher(store2, on_event=build_handle_event(svc2, NullDeadlineScheduler()), credentials="fake-creds")
         watcher2.check_once()
         self.assertEqual(len(llm2.calls), 0, "Re-notified after restart — dedup bug")
         self.assertEqual(len(n2.sent),    0, "Re-emailed after restart — dedup bug")

@@ -37,7 +37,7 @@ def _stub(*names):
 
 _stub(
     "anthropic", "dotenv", "fastmcp", "fastmcp.utilities.types", "pydantic",
-    "google.auth.transport.requests", "google.oauth2.credentials",
+    "google.auth.transport.requests", "google.oauth2.credentials", "google.oauth2.id_token",
     "google_auth_oauthlib.flow",
     "googleapiclient.discovery", "googleapiclient.http", "googleapiclient.errors",
     "apscheduler.schedulers.blocking", "apscheduler.schedulers.background",
@@ -89,7 +89,9 @@ sys.modules["pydantic"].Field = _Field()
 
 sys.modules["google.auth.transport.requests"].Request = object
 sys.modules["google.oauth2.credentials"].Credentials = object
+sys.modules["google.oauth2.id_token"].verify_oauth2_token = lambda *a, **k: {}
 sys.modules["google_auth_oauthlib.flow"].InstalledAppFlow = object
+sys.modules["google_auth_oauthlib.flow"].Flow = object
 sys.modules["googleapiclient.discovery"].build = lambda *a, **k: None
 sys.modules["googleapiclient.discovery"].Resource = object
 sys.modules["googleapiclient.http"].MediaIoBaseUpload = object
@@ -107,7 +109,9 @@ sys.modules["apscheduler.executors.pool"].ThreadPoolExecutor = type(
     "TPE", (), {"__init__": lambda s, **k: None}
 )
 
-for _mod in ("classpilot.server", "classpilot.classroom_client", "classpilot.study_client"):
+for _mod in ("classpilot.server", "classpilot.classroom_client", "classpilot.study_client",
+             "classpilot.google_oauth", "classpilot.identity", "classpilot.user_store",
+             "classpilot.services", "classpilot.watcher", "classpilot.deadline_scheduler"):
     sys.modules.pop(_mod, None)
 
 import classpilot.server as srv  # noqa: E402
@@ -133,6 +137,16 @@ class TestGetMaterialReturnsMixedContent(unittest.TestCase):
             "link": "http://x", "created": "",
             "attachments": [{"type": "drive", "id": "f1", "title": "SVM.pptx", "link": "http://drive/f1"}],
         }
+        # These tests exercise get_material's visual-content plumbing, not
+        # identity/credential resolution (that's covered by
+        # tests/test_multiuser_isolation.py and test_identity.py) — patch
+        # it out to a fixed, fake identity/credentials pair.
+        self._identity_patcher = patch(
+            "classpilot.server._resolve_credentials",
+            return_value=(types.SimpleNamespace(user_id="fake-user", source="test"), "fake-credentials"),
+        )
+        self._identity_patcher.start()
+        self.addCleanup(self._identity_patcher.stop)
 
     def test_material_with_one_visual_returns_material_plus_one_image(self):
         fake_result = {

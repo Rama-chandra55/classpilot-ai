@@ -27,20 +27,34 @@ Visual content (diagrams/charts/screenshots — NOT OCR):
   (size + repeated-logo/watermark filtering, capped per file).
 
 All functions raise exceptions on failure; callers catch and surface errors.
+
+Phase 3 — explicit per-user credentials, never the global singleton:
+  Every function below takes `credentials` (a google.oauth2.credentials.
+  Credentials object, resolved per-request via classpilot.identity +
+  classpilot.google_oauth.get_authorized_credentials) as its first
+  argument, and builds its Google API client fresh, per call
+  (`googleapiclient.discovery.build(serviceName, version,
+  credentials=credentials)`). This file no longer imports
+  get_classroom_service/get_drive_service/get_docs_service (the
+  vendor's global, token.json-backed singleton) at all — there is no
+  code path here that could silently fall back to it. No service
+  client is cached anywhere in this module (a cached client built from
+  one user's credentials must never be reused for another), and no
+  downloaded content is ever written to disk (everything stays in an
+  in-memory io.BytesIO(), unchanged from Phase 1/2).
 """
 
 import io
 import logging
 from typing import Any, Optional
 
-from .classroom_client import classroom, drive, docs
 from .visual_extractor import (
     extract_pptx_visuals,
     extract_pdf_visuals,
     extract_docx_visuals,
     prepare_standalone_image,
 )
-from classroom_suite_mcp.auth import get_classroom_service, get_drive_service, get_docs_service
+from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
 from pptx import Presentation
 from pypdf import PdfReader
@@ -140,13 +154,13 @@ def _paginate(list_fn, item_key: str, params: dict) -> list[dict]:
 
 # ── 1. Courses ────────────────────────────────────────────────────────────────
 
-def fetch_courses(page_size: int = 100) -> list[dict[str, Any]]:
+def fetch_courses(credentials, page_size: int = 100) -> list[dict[str, Any]]:
     """List all active Classroom courses the student is enrolled in.
 
     Pages through the full result set — courses are not silently truncated
     if the student is enrolled in more than one page's worth.
     """
-    svc = get_classroom_service()
+    svc = build("classroom", "v1", credentials=credentials)
     raw = _paginate(
         svc.courses().list,
         "courses",
@@ -168,13 +182,13 @@ def fetch_courses(page_size: int = 100) -> list[dict[str, Any]]:
 
 # ── 2. Topics / Modules ───────────────────────────────────────────────────────
 
-def fetch_topics(course_id: str, page_size: int = 100) -> list[dict[str, Any]]:
+def fetch_topics(credentials, course_id: str, page_size: int = 100) -> list[dict[str, Any]]:
     """List all topics (modules) in a course, ordered by topicId.
 
     Pages through the full result set — courses with many modules will not
     have later topics silently dropped.
     """
-    svc = get_classroom_service()
+    svc = build("classroom", "v1", credentials=credentials)
     raw = _paginate(
         svc.courses().topics().list,
         "topic",
@@ -195,7 +209,7 @@ def fetch_topics(course_id: str, page_size: int = 100) -> list[dict[str, Any]]:
 
 # ── 3. Materials in a module ──────────────────────────────────────────────────
 
-def fetch_course_work_materials(course_id: str, topic_id: Optional[str] = None) -> list[dict]:
+def fetch_course_work_materials(credentials, course_id: str, topic_id: Optional[str] = None) -> list[dict]:
     """
     Fetch teacher-posted study materials (courseWorkMaterial resources).
     Requires the classroom.courseworkmaterials scope.
@@ -203,7 +217,7 @@ def fetch_course_work_materials(course_id: str, topic_id: Optional[str] = None) 
     Pages through the full result set before filtering by topic, so modules
     beyond the first page of materials are not silently dropped.
     """
-    svc = get_classroom_service()
+    svc = build("classroom", "v1", credentials=credentials)
     items = _paginate(
         svc.courses().courseWorkMaterials().list,
         "courseWorkMaterial",
@@ -214,14 +228,14 @@ def fetch_course_work_materials(course_id: str, topic_id: Optional[str] = None) 
     return [_normalise_material(m, "MATERIAL") for m in items]
 
 
-def fetch_assignments(course_id: str, topic_id: Optional[str] = None) -> list[dict]:
+def fetch_assignments(credentials, course_id: str, topic_id: Optional[str] = None) -> list[dict]:
     """
     Fetch assignments for a course/topic.
     Shown as info only — no submission capability exposed.
 
     Pages through the full result set before filtering by topic.
     """
-    svc = get_classroom_service()
+    svc = build("classroom", "v1", credentials=credentials)
     items = _paginate(
         svc.courses().courseWork().list,
         "courseWork",
@@ -232,13 +246,13 @@ def fetch_assignments(course_id: str, topic_id: Optional[str] = None) -> list[di
     return [_normalise_material(m, "ASSIGNMENT") for m in items]
 
 
-def fetch_announcements(course_id: str) -> list[dict]:
+def fetch_announcements(credentials, course_id: str) -> list[dict]:
     """Fetch course announcements. Requires classroom.announcements scope.
 
     Pages through the full result set so older announcements beyond the
     first page are still returned.
     """
-    svc = get_classroom_service()
+    svc = build("classroom", "v1", credentials=credentials)
     try:
         items = _paginate(
             svc.courses().announcements().list,
@@ -304,7 +318,7 @@ def _normalise_material(raw: dict, kind: str) -> dict:
 
 # ── 4. File content extraction ────────────────────────────────────────────────
 
-def read_drive_file(file_id: str) -> dict[str, Any]:
+def read_drive_file(credentials, file_id: str) -> dict[str, Any]:
     """
     Attempt to read the text content of a Drive file, and — for
     PPTX/PDF/DOCX and direct image attachments — pull out any important
@@ -324,7 +338,7 @@ def read_drive_file(file_id: str) -> dict[str, Any]:
                           with no visual pipeline, or when a file has no
                           images meeting the significance threshold.
     """
-    svc = get_drive_service()
+    svc = build("drive", "v3", credentials=credentials)
 
     # Get file metadata first
     meta = svc.files().get(
@@ -631,7 +645,7 @@ def _url_only_note(mime: str) -> str:
 
 # ── 5. Search across Classroom ────────────────────────────────────────────────
 
-def search_all(query: str) -> list[dict[str, Any]]:
+def search_all(credentials, query: str) -> list[dict[str, Any]]:
     """
     Search course names, topic names, and material titles for a query string.
     Case-insensitive substring match. Returns results with location context.
@@ -640,7 +654,7 @@ def search_all(query: str) -> list[dict[str, Any]]:
     results = []
 
     try:
-        courses = fetch_courses()
+        courses = fetch_courses(credentials)
     except Exception as exc:
         logger.error("search_all: failed to list courses: %s", exc)
         return []
@@ -661,7 +675,7 @@ def search_all(query: str) -> list[dict[str, Any]]:
 
         # Topic matches
         try:
-            topics = fetch_topics(cid)
+            topics = fetch_topics(credentials, cid)
         except Exception:
             topics = []
 
@@ -678,7 +692,7 @@ def search_all(query: str) -> list[dict[str, Any]]:
         # Material / assignment title matches
         for fetcher in (fetch_course_work_materials, fetch_assignments):
             try:
-                items = fetcher(cid)
+                items = fetcher(credentials, cid)
             except Exception:
                 items = []
             for item in items:

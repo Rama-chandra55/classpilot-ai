@@ -16,17 +16,34 @@ Watcher tools (kept):
     stop_assignment_watcher  — stop the watcher
 
 Transport: stdio (Claude Desktop, Cursor) or HTTP (classpilot/http_server.py)
+
+Phase 3 — every tool resolves its own caller identity and credentials:
+  Each of the 8 tools below starts by calling `_resolve_credentials()`,
+  which internally does `resolve_identity()` (classpilot/identity.py —
+  Phase 3: a configured dev user id; Phase 4: real per-request identity
+  from an authenticated MCP session, with no other change needed here)
+  followed by `get_authorized_credentials()` (classpilot/google_oauth.py
+  — the user's own PostgreSQL-stored, encrypted Google credentials).
+  `user_id` is never a tool parameter — it's resolved internally and
+  never caller-controlled. If no credentials are on file (or a scope/
+  refresh failure occurs), the tool raises a clear error; it NEVER falls
+  back to the vendor's token.json-backed global singleton — that path
+  only exists for classpilot-ai's explicit standalone/legacy mode (see
+  main.py, services.build_services()), which this MCP server never calls.
 """
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastmcp import FastMCP
 from fastmcp.utilities.types import Image
 from pydantic import BaseModel, Field
 
-from .services import AppServices, build_services
+from .identity import resolve_identity, RequestIdentity, IdentityResolutionError
+from .google_oauth import get_authorized_credentials, GoogleOAuthError
+from .user_store import UserStore
+from .services import AppServices, build_user_services
 from .deadline_scheduler import _parse_due_datetime
 from .study_client import (
     fetch_courses,
@@ -54,16 +71,44 @@ mcp = FastMCP(
     ),
 )
 
-# ── Shared services (lazy-init) ───────────────────────────────────────────────
 
-_services: Optional[AppServices] = None
+# ── Identity + credentials resolution (Phase 3) ────────────────────────────────
+
+def _resolve_credentials():
+    """
+    Resolve the calling identity and their live Google credentials.
+
+    Every tool calls this first, and only this — it is the single seam
+    that will change in Phase 4 (resolve_identity()'s implementation
+    swaps to real per-request MCP session identity; everything downstream
+    of it, including this function, is unaffected).
+
+    Raises IdentityResolutionError / GoogleOAuthError on failure — never
+    silently substitutes another identity or falls back to token.json.
+    """
+    identity = resolve_identity()
+    credentials = get_authorized_credentials(identity.user_id, UserStore())
+    return identity, credentials
 
 
-def _get_services() -> AppServices:
-    global _services
-    if _services is None:
-        _services = build_services(validate=False)
-    return _services
+# ── Per-user watcher services (Phase 3: no process-global singleton) ──────────
+# Keyed by user_id so one identified user can never start, stop, or
+# otherwise affect another user's watcher/scheduler — see services.py's
+# AppServices, which now belongs to exactly one user.
+_user_services: Dict[str, AppServices] = {}
+
+
+def _get_user_services(identity: RequestIdentity, credentials) -> AppServices:
+    """Look up (or lazily build) THIS identity's own AppServices instance."""
+    existing = _user_services.get(identity.user_id)
+    if existing is not None:
+        return existing
+
+    user = UserStore().get_user_by_id(identity.user_id)
+    to_email = user.email if user else None
+    services = build_user_services(identity.user_id, credentials, to_email=to_email)
+    _user_services[identity.user_id] = services
+    return services
 
 
 # ── Pydantic output models ────────────────────────────────────────────────────
@@ -193,7 +238,8 @@ def list_classes() -> List[CourseInfo]:
     with list_modules to explore a specific subject.
     """
     try:
-        courses = fetch_courses()
+        _identity, credentials = _resolve_credentials()
+        courses = fetch_courses(credentials)
         return [CourseInfo(**c) for c in courses]
     except Exception as exc:
         logger.error("list_classes failed: %s", exc, exc_info=True)
@@ -212,7 +258,8 @@ def list_modules(course_id: str) -> List[ModuleInfo]:
     list_materials to see what's inside each module.
     """
     try:
-        topics = fetch_topics(course_id)
+        _identity, credentials = _resolve_credentials()
+        topics = fetch_topics(credentials, course_id)
         if not topics:
             return []
         return [ModuleInfo(**t) for t in topics]
@@ -245,17 +292,18 @@ def list_materials(
     not support submitting or turning in work.
     """
     try:
+        _identity, credentials = _resolve_credentials()
         items: list = []
 
-        mats = fetch_course_work_materials(course_id, topic_id)
+        mats = fetch_course_work_materials(credentials, course_id, topic_id)
         items.extend(mats)
 
         if include_assignments:
-            assignments = fetch_assignments(course_id, topic_id)
+            assignments = fetch_assignments(credentials, course_id, topic_id)
             items.extend(assignments)
 
         if include_announcements:
-            anns = fetch_announcements(course_id)
+            anns = fetch_announcements(credentials, course_id)
             if topic_id:
                 anns = [a for a in anns if a.get("topic_id") == topic_id]
             items.extend(anns)
@@ -351,7 +399,8 @@ def get_material(
     fetcher = svc_map.get(material_kind.upper(), fetch_course_work_materials)
 
     try:
-        items = fetcher(course_id)
+        _identity, credentials = _resolve_credentials()
+        items = fetcher(credentials, course_id)
         item = next((i for i in items if i["id"] == material_id), None)
         if not item:
             raise ValueError(
@@ -372,7 +421,7 @@ def get_material(
         entry = dict(att)
         if read_attachments and att.get("type") == "drive" and att.get("id"):
             try:
-                file_result = read_drive_file(att["id"])
+                file_result = read_drive_file(credentials, att["id"])
                 entry.update({
                     "readable":  file_result["readable"],
                     "content":   file_result["content"],
@@ -423,7 +472,8 @@ def search_classroom(query: str) -> List[SearchResult]:
     so you can navigate to the right place with list_modules or list_materials.
     """
     try:
-        results = search_all(query)
+        _identity, credentials = _resolve_credentials()
+        results = search_all(credentials, query)
         return [
             SearchResult(
                 type=r["type"],
@@ -458,7 +508,8 @@ def get_upcoming_deadlines(within_hours: int = 168) -> List[DeadlineInfo]:
     deadlines = []
 
     try:
-        courses = fetch_courses()
+        _identity, credentials = _resolve_credentials()
+        courses = fetch_courses(credentials)
     except Exception as exc:
         logger.error("get_upcoming_deadlines: %s", exc)
         return []
@@ -469,7 +520,7 @@ def get_upcoming_deadlines(within_hours: int = 168) -> List[DeadlineInfo]:
             # fetch_assignments pages through the full Classroom result set
             # (see study_client._paginate), so deadlines are not silently
             # truncated for courses with more than one page of coursework.
-            assignments = fetch_assignments(cid)
+            assignments = fetch_assignments(credentials, cid)
         except Exception:
             continue
         for a in assignments:
@@ -506,7 +557,8 @@ def start_assignment_watcher() -> WatcherResult:
     and sends AI-generated email notifications for new assignments and
     deadline reminders at 1 day / 6 hours / 1 hour / 15 minutes before each due date.
     """
-    svc = _get_services()
+    identity, credentials = _resolve_credentials()
+    svc = _get_user_services(identity, credentials)
     if svc.is_watcher_running:
         return WatcherResult(running=True, message="Watcher is already running.")
     svc.start_background_scheduler()
@@ -522,7 +574,8 @@ def start_assignment_watcher() -> WatcherResult:
 @mcp.tool()
 def stop_assignment_watcher() -> WatcherResult:
     """Stop the background assignment watcher and all pending reminder jobs."""
-    svc = _get_services()
+    identity, credentials = _resolve_credentials()
+    svc = _get_user_services(identity, credentials)
     if not svc.is_watcher_running:
         return WatcherResult(running=False, message="Watcher was not running.")
     svc.stop_scheduler()

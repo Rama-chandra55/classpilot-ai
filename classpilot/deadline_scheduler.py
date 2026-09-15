@@ -15,6 +15,15 @@ Google Classroom API note:
   due_date  → {"year": int, "month": int, "day": int}   (civil date)
   due_time  → {"hours": int, "minutes": int, ...}        (UTC time-of-day)
   Together they form a UTC datetime.
+
+Phase 3 — user-scoped:
+  DeadlineScheduler now belongs to exactly one user (`user_id`, passed at
+  construction). Job IDs include it, so two students sharing a course and
+  assignment (same course_id/assignment_id — Classroom IDs aren't
+  per-student) never overwrite each other's APScheduler jobs the way
+  `reminder_{course_id}_{assignment_id}_{offset}` used to allow. StateStore
+  reminder-sent checks are scoped by the same user_id, matching the
+  widened PRIMARY KEY in state_store.py.
 """
 
 import logging
@@ -24,7 +33,7 @@ from typing import Optional
 from .config import ClassPilotConfig
 from .events import EventType
 from .notification_service import NotificationService
-from .state_store import StateStore
+from .state_store import StateStore, DEFAULT_USER_ID
 from .watcher import AssignmentEvent
 
 logger = logging.getLogger(__name__)
@@ -54,10 +63,10 @@ def _parse_due_datetime(
 
 class DeadlineScheduler:
     """
-    Manages timed reminder jobs for assignment deadlines.
+    Manages timed reminder jobs for one user's assignment deadlines.
 
     Usage in main.py:
-        ds = DeadlineScheduler(state_store, notification_service, config)
+        ds = DeadlineScheduler(state_store, notification_service, config, user_id=...)
         # ... build watcher and APScheduler ...
         ds.attach_scheduler(apscheduler)
         apscheduler.start()
@@ -68,16 +77,18 @@ class DeadlineScheduler:
         state_store: StateStore,
         notification_service: NotificationService,
         config: ClassPilotConfig,
+        user_id: str = DEFAULT_USER_ID,
     ):
         self._state = state_store
         self._svc = notification_service
         self._offsets: tuple = config.deadline_alert_offsets_minutes
         self._scheduler = None  # set via attach_scheduler() before start()
+        self._user_id = user_id
 
     def attach_scheduler(self, scheduler) -> None:
         """Wire the APScheduler instance after it has been built."""
         self._scheduler = scheduler
-        logger.debug("DeadlineScheduler attached to APScheduler")
+        logger.debug("DeadlineScheduler attached to APScheduler (user_id=%s)", self._user_id)
 
     # ------------------------------------------------------------------
     # Public API called from handle_event()
@@ -128,7 +139,7 @@ class DeadlineScheduler:
                 continue
 
             if self._state.has_sent_reminder(
-                event.course_id, event.assignment_id, offset_minutes
+                event.course_id, event.assignment_id, offset_minutes, user_id=self._user_id,
             ):
                 logger.debug(
                     "Skipping %d-min reminder for '%s' — already sent",
@@ -150,6 +161,7 @@ class DeadlineScheduler:
                         offset_minutes,
                         self._state,
                         self._svc,
+                        self._user_id,
                     ],
                     id=job_id,
                     replace_existing=True,
@@ -181,9 +193,8 @@ class DeadlineScheduler:
                 # Job may not exist (already fired, or never scheduled) — fine
                 pass
 
-    @staticmethod
-    def _job_id(course_id: str, assignment_id: str, offset_minutes: int) -> str:
-        return f"reminder_{course_id}_{assignment_id}_{offset_minutes}"
+    def _job_id(self, course_id: str, assignment_id: str, offset_minutes: int) -> str:
+        return f"reminder_{self._user_id}_{course_id}_{assignment_id}_{offset_minutes}"
 
 
 # ------------------------------------------------------------------
@@ -198,12 +209,13 @@ def _fire_reminder(
     offset_minutes: int,
     state: StateStore,
     svc: NotificationService,
+    user_id: str = DEFAULT_USER_ID,
 ) -> None:
     """
     Called by APScheduler at the scheduled fire time.
     Guards against duplicate delivery with a StateStore check.
     """
-    if state.has_sent_reminder(course_id, assignment_id, offset_minutes):
+    if state.has_sent_reminder(course_id, assignment_id, offset_minutes, user_id=user_id):
         logger.info(
             "Reminder already sent for '%s' at offset %d min — skipping",
             title, offset_minutes,
@@ -211,12 +223,12 @@ def _fire_reminder(
         return
 
     label = _offset_label(offset_minutes)
-    logger.info("Firing %s reminder for '%s'", label, title)
+    logger.info("Firing %s reminder for '%s' (user_id=%s)", label, title, user_id)
 
     delivered = svc.notify(EventType.DEADLINE_REMINDER, title)
 
     if delivered:
-        state.mark_reminder_sent(course_id, assignment_id, offset_minutes)
+        state.mark_reminder_sent(course_id, assignment_id, offset_minutes, user_id=user_id)
         logger.info("Reminder delivered and recorded: '%s' (%s)", title, label)
     else:
         logger.error(

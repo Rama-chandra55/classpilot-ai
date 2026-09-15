@@ -78,7 +78,27 @@ sys.modules["fastmcp"].FastMCP = type("FastMCP", (), {
 sys.modules["google.auth.transport.requests"].Request = object
 sys.modules["google.oauth2.credentials"].Credentials = object
 sys.modules["google_auth_oauthlib.flow"].InstalledAppFlow = object
-sys.modules["googleapiclient.discovery"].build = lambda *a, **k: MagicMock()
+
+
+def _fake_build(serviceName, version, credentials=None, **kw):
+    """
+    Routes to the SAME shared mock service objects the tests already
+    configure (_mock_classroom_svc / _mock_drive_svc), based on which
+    Google API is being requested — exactly mirroring what the real
+    study_client.py now does (build(serviceName, version,
+    credentials=...) per call, no cached global service singleton).
+    `credentials` is accepted but ignored here; see FAKE_CREDS below —
+    these tests aren't exercising real credential objects, only that
+    they're threaded through to the right service.
+    """
+    if serviceName == "classroom":
+        return _mock_classroom_svc
+    if serviceName == "drive":
+        return _mock_drive_svc
+    return MagicMock()
+
+
+sys.modules["googleapiclient.discovery"].build = _fake_build
 sys.modules["googleapiclient.discovery"].Resource = object
 sys.modules["googleapiclient.http"].MediaIoBaseUpload = object
 sys.modules["googleapiclient.http"].MediaIoBaseDownload = MagicMock
@@ -90,6 +110,14 @@ sys.modules["apscheduler.schedulers.background"].BackgroundScheduler = type("BGS
     "remove_job": lambda s, j: None, "running": True,
 })
 sys.modules["apscheduler.executors.pool"].ThreadPoolExecutor = type("TPE", (), {"__init__": lambda s, **k: None})
+
+# Placeholder Google credentials object for tests that don't care about
+# the actual credentials value — study_client.py's functions now require
+# an explicit credentials argument (Phase 3: never a silent global/
+# token.json fallback), and _fake_build above ignores it, routing purely
+# by serviceName to the shared mock service objects these tests already
+# configure.
+FAKE_CREDS = MagicMock(name="fake-credentials")
 
 # Stub auth functions used by study_client
 _mock_classroom_svc = MagicMock()
@@ -153,23 +181,23 @@ class TestFetchCourses(unittest.TestCase):
 
     def test_returns_list_of_courses(self):
         _mock_classroom_svc.courses().list().execute.return_value = {"courses": [RAW_COURSE]}
-        result = sc.fetch_courses()
+        result = sc.fetch_courses(FAKE_CREDS)
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["name"], "Deep Learning")
 
     def test_returns_empty_when_no_courses(self):
         _mock_classroom_svc.courses().list().execute.return_value = {"courses": []}
-        self.assertEqual(sc.fetch_courses(), [])
+        self.assertEqual(sc.fetch_courses(FAKE_CREDS), [])
 
     def test_filters_active_courses(self):
         _mock_classroom_svc.courses().list().execute.return_value = {"courses": [RAW_COURSE]}
-        sc.fetch_courses()
+        sc.fetch_courses(FAKE_CREDS)
         call_kwargs = _mock_classroom_svc.courses().list.call_args[1]
         self.assertIn("ACTIVE", call_kwargs.get("courseStates", []))
 
     def test_all_fields_present(self):
         _mock_classroom_svc.courses().list().execute.return_value = {"courses": [RAW_COURSE]}
-        r = sc.fetch_courses()[0]
+        r = sc.fetch_courses(FAKE_CREDS)[0]
         for key in ("id", "name", "section", "state", "link"):
             self.assertIn(key, r)
 
@@ -180,7 +208,7 @@ class TestFetchCourses(unittest.TestCase):
             {"courses": [RAW_COURSE], "nextPageToken": "TOK1"},
             {"courses": [course2]},  # final page: no nextPageToken
         ]
-        result = sc.fetch_courses()
+        result = sc.fetch_courses(FAKE_CREDS)
         self.assertEqual(len(result), 2)
         self.assertEqual({r["name"] for r in result}, {"Deep Learning", "Quantum Computing"})
 
@@ -190,7 +218,7 @@ class TestFetchCourses(unittest.TestCase):
             {"courses": [RAW_COURSE], "nextPageToken": "TOK1"},
             {"courses": [course2]},
         ]
-        sc.fetch_courses()
+        sc.fetch_courses(FAKE_CREDS)
         second_call_kwargs = _mock_classroom_svc.courses().list.call_args_list[-1][1]
         self.assertEqual(second_call_kwargs.get("pageToken"), "TOK1")
 
@@ -202,17 +230,17 @@ class TestFetchTopics(unittest.TestCase):
         _mock_classroom_svc.courses().topics().list().execute.return_value = {
             "topic": [RAW_TOPIC2, RAW_TOPIC]  # out of order
         }
-        result = sc.fetch_topics("c1")
+        result = sc.fetch_topics(FAKE_CREDS, "c1")
         self.assertEqual(result[0]["name"], "Module 1 - Intro")
         self.assertEqual(result[1]["name"], "Module 2 - CNN")
 
     def test_returns_empty_when_no_topics(self):
         _mock_classroom_svc.courses().topics().list().execute.return_value = {"topic": []}
-        self.assertEqual(sc.fetch_topics("c1"), [])
+        self.assertEqual(sc.fetch_topics(FAKE_CREDS, "c1"), [])
 
     def test_all_fields_present(self):
         _mock_classroom_svc.courses().topics().list().execute.return_value = {"topic": [RAW_TOPIC]}
-        r = sc.fetch_topics("c1")[0]
+        r = sc.fetch_topics(FAKE_CREDS, "c1")[0]
         self.assertEqual(r["id"], "1")
         self.assertEqual(r["name"], "Module 1 - Intro")
 
@@ -222,7 +250,7 @@ class TestFetchTopics(unittest.TestCase):
             {"topic": [RAW_TOPIC], "nextPageToken": "TOK1"},
             {"topic": [RAW_TOPIC2]},
         ]
-        result = sc.fetch_topics("c1")
+        result = sc.fetch_topics(FAKE_CREDS, "c1")
         self.assertEqual(len(result), 2)
         self.assertEqual({r["name"] for r in result}, {"Module 1 - Intro", "Module 2 - CNN"})
 
@@ -234,7 +262,7 @@ class TestFetchMaterials(unittest.TestCase):
         _mock_classroom_svc.courses().courseWorkMaterials().list().execute.return_value = {
             "courseWorkMaterial": [RAW_MATERIAL]
         }
-        result = sc.fetch_course_work_materials("c1")
+        result = sc.fetch_course_work_materials(FAKE_CREDS, "c1")
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["kind"], "MATERIAL")
 
@@ -243,14 +271,14 @@ class TestFetchMaterials(unittest.TestCase):
         _mock_classroom_svc.courses().courseWorkMaterials().list().execute.return_value = {
             "courseWorkMaterial": [RAW_MATERIAL, mat2]
         }
-        result = sc.fetch_course_work_materials("c1", topic_id="1")
+        result = sc.fetch_course_work_materials(FAKE_CREDS, "c1", topic_id="1")
         self.assertEqual(len(result), 1)
 
     def test_attachments_normalised(self):
         _mock_classroom_svc.courses().courseWorkMaterials().list().execute.return_value = {
             "courseWorkMaterial": [RAW_MATERIAL]
         }
-        result = sc.fetch_course_work_materials("c1")
+        result = sc.fetch_course_work_materials(FAKE_CREDS, "c1")
         atts = result[0]["attachments"]
         types = [a["type"] for a in atts]
         self.assertIn("drive",   types)
@@ -260,7 +288,7 @@ class TestFetchMaterials(unittest.TestCase):
         _mock_classroom_svc.courses().courseWork().list().execute.return_value = {
             "courseWork": [RAW_ASSIGNMENT]
         }
-        result = sc.fetch_assignments("c1")
+        result = sc.fetch_assignments(FAKE_CREDS, "c1")
         self.assertEqual(result[0]["kind"], "ASSIGNMENT")
 
     def test_materials_page_through_nextPageToken_before_topic_filter(self):
@@ -274,7 +302,7 @@ class TestFetchMaterials(unittest.TestCase):
             {"courseWorkMaterial": [RAW_MATERIAL], "nextPageToken": "TOK1"},
             {"courseWorkMaterial": [mat2]},
         ]
-        result = sc.fetch_course_work_materials("c1", topic_id="1")
+        result = sc.fetch_course_work_materials(FAKE_CREDS, "c1", topic_id="1")
         self.assertEqual(len(result), 2)
 
     def test_assignments_page_through_nextPageToken(self):
@@ -283,7 +311,7 @@ class TestFetchMaterials(unittest.TestCase):
             {"courseWork": [RAW_ASSIGNMENT], "nextPageToken": "TOK1"},
             {"courseWork": [assignment2]},
         ]
-        result = sc.fetch_assignments("c1")
+        result = sc.fetch_assignments(FAKE_CREDS, "c1")
         self.assertEqual(len(result), 2)
 
 
@@ -298,7 +326,7 @@ class TestFetchAnnouncementsPagination(unittest.TestCase):
         _mock_classroom_svc.courses().announcements().list().execute.return_value = {
             "announcement": [self.RAW_ANNOUNCEMENT]
         }
-        result = sc.fetch_announcements("c1")
+        result = sc.fetch_announcements(FAKE_CREDS, "c1")
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0]["kind"], "ANNOUNCEMENT")
 
@@ -308,12 +336,12 @@ class TestFetchAnnouncementsPagination(unittest.TestCase):
             {"announcement": [self.RAW_ANNOUNCEMENT], "nextPageToken": "TOK1"},
             {"announcement": [ann2]},
         ]
-        result = sc.fetch_announcements("c1")
+        result = sc.fetch_announcements(FAKE_CREDS, "c1")
         self.assertEqual(len(result), 2)
 
     def test_failure_returns_empty_list_not_exception(self):
         _mock_classroom_svc.courses().announcements().list().execute.side_effect = Exception("no scope")
-        result = sc.fetch_announcements("c1")
+        result = sc.fetch_announcements(FAKE_CREDS, "c1")
         self.assertEqual(result, [])
 
 
@@ -406,7 +434,7 @@ class TestReadDriveFile(unittest.TestCase):
         with patch("classpilot.study_client.MediaIoBaseDownload", return_value=mock_dl):
             with patch("io.BytesIO", return_value=buf):
                 _mock_drive_svc.files().export_media.return_value = MagicMock()
-                result = sc.read_drive_file("f1")
+                result = sc.read_drive_file(FAKE_CREDS, "f1")
         self.assertTrue(result["readable"])
         self.assertEqual(result["mime_type"], "application/vnd.google-apps.document")
 
@@ -428,7 +456,7 @@ class TestReadDriveFile(unittest.TestCase):
 
         with patch("classpilot.study_client.MediaIoBaseDownload", side_effect=_fake_download):
             _mock_drive_svc.files().get_media.return_value = MagicMock()
-            result = sc.read_drive_file("f1")
+            result = sc.read_drive_file(FAKE_CREDS, "f1")
 
         # A blank page has no extractable text, so this should be readable=False
         # with a graceful "no text found" note rather than an error/crash.
@@ -459,7 +487,7 @@ class TestReadDriveFile(unittest.TestCase):
 
         with patch("classpilot.study_client.MediaIoBaseDownload", side_effect=_fake_download):
             _mock_drive_svc.files().get_media.return_value = MagicMock()
-            result = sc.read_drive_file("f1")
+            result = sc.read_drive_file(FAKE_CREDS, "f1")
 
         self.assertTrue(result["readable"])
         self.assertIn("Neural Networks Lecture Notes", result["content"])
@@ -476,7 +504,7 @@ class TestReadDriveFile(unittest.TestCase):
 
         with patch("classpilot.study_client.MediaIoBaseDownload", side_effect=_fake_download):
             _mock_drive_svc.files().get_media.return_value = MagicMock()
-            result = sc.read_drive_file("f1")
+            result = sc.read_drive_file(FAKE_CREDS, "f1")
 
         self.assertFalse(result["readable"])
         self.assertEqual(result["content"], "")
@@ -492,7 +520,7 @@ class TestReadDriveFile(unittest.TestCase):
 
         with patch("classpilot.study_client.MediaIoBaseDownload", side_effect=_fake_download):
             _mock_drive_svc.files().get_media.return_value = MagicMock()
-            result = sc.read_drive_file("f1")
+            result = sc.read_drive_file(FAKE_CREDS, "f1")
 
         self.assertFalse(result["readable"])
         self.assertEqual(result["content"], "")
@@ -522,7 +550,7 @@ class TestReadDriveFile(unittest.TestCase):
 
         with patch("classpilot.study_client.MediaIoBaseDownload", side_effect=_fake_download):
             _mock_drive_svc.files().get_media.return_value = MagicMock()
-            result = sc.read_drive_file("f1")
+            result = sc.read_drive_file(FAKE_CREDS, "f1")
 
         self.assertTrue(result["readable"])
         self.assertIn("Assignment 1", result["content"])
@@ -544,7 +572,7 @@ class TestReadDriveFile(unittest.TestCase):
 
         with patch("classpilot.study_client.MediaIoBaseDownload", side_effect=_fake_download):
             _mock_drive_svc.files().get_media.return_value = MagicMock()
-            result = sc.read_drive_file("f1")
+            result = sc.read_drive_file(FAKE_CREDS, "f1")
 
         self.assertFalse(result["readable"])
         self.assertEqual(result["content"], "")
@@ -570,7 +598,7 @@ class TestReadDriveFile(unittest.TestCase):
 
         with patch("classpilot.study_client.MediaIoBaseDownload", side_effect=_fake_download):
             _mock_drive_svc.files().get_media.return_value = MagicMock()
-            result = sc.read_drive_file("f1")
+            result = sc.read_drive_file(FAKE_CREDS, "f1")
 
         self.assertFalse(result["readable"])
         self.assertEqual(result["content"], "")
@@ -578,7 +606,7 @@ class TestReadDriveFile(unittest.TestCase):
 
     def test_legacy_doc_returns_url_only(self):
         self._setup_meta("application/msword", "OldEssay.doc")
-        result = sc.read_drive_file("f1")
+        result = sc.read_drive_file(FAKE_CREDS, "f1")
         self.assertFalse(result["readable"])
         self.assertIn("legacy .doc", result["note"])
 
@@ -605,7 +633,7 @@ class TestReadDriveFile(unittest.TestCase):
 
         with patch("classpilot.study_client.MediaIoBaseDownload", side_effect=_fake_download):
             _mock_drive_svc.files().get_media.return_value = MagicMock()
-            result = sc.read_drive_file("f1")
+            result = sc.read_drive_file(FAKE_CREDS, "f1")
 
         self.assertTrue(result["readable"])
         self.assertIn("Neural Networks", result["content"])
@@ -625,7 +653,7 @@ class TestReadDriveFile(unittest.TestCase):
 
         with patch("classpilot.study_client.MediaIoBaseDownload", side_effect=_fake_download):
             _mock_drive_svc.files().get_media.return_value = MagicMock()
-            result = sc.read_drive_file("f1")
+            result = sc.read_drive_file(FAKE_CREDS, "f1")
 
         self.assertFalse(result["readable"])
         self.assertEqual(result["content"], "")
@@ -633,18 +661,18 @@ class TestReadDriveFile(unittest.TestCase):
 
     def test_legacy_ppt_returns_url_only(self):
         self._setup_meta("application/vnd.ms-powerpoint", "OldLecture.ppt")
-        result = sc.read_drive_file("f1")
+        result = sc.read_drive_file(FAKE_CREDS, "f1")
         self.assertFalse(result["readable"])
         self.assertIn("legacy .ppt", result["note"])
 
     def test_url_only_result_has_link(self):
         self._setup_meta("application/vnd.ms-powerpoint", "file.ppt", "http://drive/file")
-        result = sc.read_drive_file("f1")
+        result = sc.read_drive_file(FAKE_CREDS, "f1")
         self.assertEqual(result["link"], "http://drive/file")
 
     def test_result_always_has_required_keys(self):
         self._setup_meta("application/vnd.ms-powerpoint")
-        result = sc.read_drive_file("f1")
+        result = sc.read_drive_file(FAKE_CREDS, "f1")
         for key in ("readable", "content", "mime_type", "name", "link", "note", "visuals"):
             self.assertIn(key, result)
 
@@ -658,7 +686,7 @@ class TestReadDriveFile(unittest.TestCase):
         with patch("classpilot.study_client.MediaIoBaseDownload", return_value=mock_dl):
             with patch("io.BytesIO", return_value=buf):
                 _mock_drive_svc.files().export_media.return_value = MagicMock()
-                result = sc.read_drive_file("f1")
+                result = sc.read_drive_file(FAKE_CREDS, "f1")
         self.assertEqual(result["visuals"], [])
 
     def test_pptx_diagram_only_slide_surfaced_as_visual(self):
@@ -696,7 +724,7 @@ class TestReadDriveFile(unittest.TestCase):
 
         with patch("classpilot.study_client.MediaIoBaseDownload", side_effect=_fake_download):
             _mock_drive_svc.files().get_media.return_value = MagicMock()
-            result = sc.read_drive_file("f1")
+            result = sc.read_drive_file(FAKE_CREDS, "f1")
 
         # Text extraction: completely unchanged behavior.
         self.assertTrue(result["readable"])
@@ -736,7 +764,7 @@ class TestReadDriveFile(unittest.TestCase):
 
         with patch("classpilot.study_client.MediaIoBaseDownload", side_effect=_fake_download):
             _mock_drive_svc.files().get_media.return_value = MagicMock()
-            result = sc.read_drive_file("f1")
+            result = sc.read_drive_file(FAKE_CREDS, "f1")
 
         self.assertTrue(result["readable"])  # page 1 text untouched
         self.assertEqual(len(result["visuals"]), 1)
@@ -765,7 +793,7 @@ class TestReadDriveFile(unittest.TestCase):
 
         with patch("classpilot.study_client.MediaIoBaseDownload", side_effect=_fake_download):
             _mock_drive_svc.files().get_media.return_value = MagicMock()
-            result = sc.read_drive_file("f1")
+            result = sc.read_drive_file(FAKE_CREDS, "f1")
 
         self.assertTrue(result["readable"])
         self.assertIn("Backpropagation explained", result["content"])
@@ -797,7 +825,7 @@ class TestReadDriveFile(unittest.TestCase):
         with patch("classpilot.study_client.MediaIoBaseDownload", side_effect=_fake_download):
             with patch("classpilot.study_client.extract_pptx_visuals", side_effect=RuntimeError("boom")):
                 _mock_drive_svc.files().get_media.return_value = MagicMock()
-                result = sc.read_drive_file("f1")
+                result = sc.read_drive_file(FAKE_CREDS, "f1")
 
         self.assertTrue(result["readable"])
         self.assertIn("Neural Networks", result["content"])
@@ -815,7 +843,7 @@ class TestReadDriveFile(unittest.TestCase):
 
         with patch("classpilot.study_client.MediaIoBaseDownload", side_effect=_fake_download):
             _mock_drive_svc.files().get_media.return_value = MagicMock()
-            result = sc.read_drive_file("f1")
+            result = sc.read_drive_file(FAKE_CREDS, "f1")
 
         self.assertFalse(result["readable"])  # no text — it's an image
         self.assertEqual(len(result["visuals"]), 1)
@@ -837,7 +865,7 @@ class TestReadDriveFile(unittest.TestCase):
 
         with patch("classpilot.study_client.MediaIoBaseDownload", side_effect=_fake_download):
             _mock_drive_svc.files().get_media.return_value = MagicMock()
-            result = sc.read_drive_file("f1")
+            result = sc.read_drive_file(FAKE_CREDS, "f1")
 
         self.assertEqual(len(result["visuals"]), 1)
         self.assertEqual(result["visuals"][0]["mime_type"], "image/jpeg")
@@ -846,7 +874,7 @@ class TestReadDriveFile(unittest.TestCase):
         """Only PNG/JPEG get the direct-visual pipeline per spec — GIF/WEBP
         stay in the url-only fallback."""
         self._setup_meta("image/gif", "animation.gif")
-        result = sc.read_drive_file("f1")
+        result = sc.read_drive_file(FAKE_CREDS, "f1")
         self.assertFalse(result["readable"])
         self.assertEqual(result["visuals"], [])
         self.assertIn("image file", result["note"])
@@ -869,30 +897,30 @@ class TestSearchAll(unittest.TestCase):
 
     def test_finds_course_by_name(self):
         self._setup_classroom()
-        results = sc.search_all("deep learning")
+        results = sc.search_all(FAKE_CREDS, "deep learning")
         types = [r["type"] for r in results]
         self.assertIn("course", types)
 
     def test_finds_module_by_name(self):
         self._setup_classroom()
-        results = sc.search_all("module 1")
+        results = sc.search_all(FAKE_CREDS, "module 1")
         types = [r["type"] for r in results]
         self.assertIn("module", types)
 
     def test_finds_material_by_title(self):
         self._setup_classroom()
-        results = sc.search_all("session 1")
+        results = sc.search_all(FAKE_CREDS, "session 1")
         types = [r["type"] for r in results]
         self.assertIn("material", types)
 
     def test_returns_empty_for_no_match(self):
         self._setup_classroom()
-        results = sc.search_all("quantum cryptography thesis xyz")
+        results = sc.search_all(FAKE_CREDS, "quantum cryptography thesis xyz")
         self.assertEqual(results, [])
 
     def test_result_has_context_field(self):
         self._setup_classroom()
-        results = sc.search_all("session 1")
+        results = sc.search_all(FAKE_CREDS, "session 1")
         material_results = [r for r in results if r["type"] == "material"]
         if material_results:
             self.assertIn("context", material_results[0])
@@ -900,13 +928,13 @@ class TestSearchAll(unittest.TestCase):
 
     def test_case_insensitive(self):
         self._setup_classroom()
-        r1 = sc.search_all("DEEP LEARNING")
-        r2 = sc.search_all("deep learning")
+        r1 = sc.search_all(FAKE_CREDS, "DEEP LEARNING")
+        r2 = sc.search_all(FAKE_CREDS, "deep learning")
         self.assertEqual(len(r1), len(r2))
 
     def test_handles_course_list_failure_gracefully(self):
         _mock_classroom_svc.courses().list().execute.side_effect = Exception("API down")
-        results = sc.search_all("anything")
+        results = sc.search_all(FAKE_CREDS, "anything")
         self.assertEqual(results, [])
 
 
@@ -914,6 +942,11 @@ class TestScopeExtension(unittest.TestCase):
     """Verify classroom_client.py correctly extends vendor SCOPES."""
 
     def test_courseworkmaterials_scope_added(self):
+        import classpilot.classroom_client  # noqa: F401 - import side effect: patches vendor SCOPES.
+        # (Phase 3: study_client.py no longer imports classroom_client at
+        # all — it builds its own per-user Google API clients directly —
+        # so this test triggers the scope patch explicitly rather than
+        # relying on that now-removed transitive side effect.)
         from classroom_suite_mcp import auth as _auth
         scopes = _auth.SCOPES
         self.assertTrue(
@@ -922,6 +955,7 @@ class TestScopeExtension(unittest.TestCase):
         )
 
     def test_announcements_scope_added(self):
+        import classpilot.classroom_client  # noqa: F401 - see above
         from classroom_suite_mcp import auth as _auth
         scopes = _auth.SCOPES
         self.assertTrue(
