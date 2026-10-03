@@ -73,7 +73,22 @@ class _OAuthWebTestCase(unittest.TestCase):
         for _mod in list(sys.modules):
             if _mod == "google" or _mod.startswith("google.") or _mod.startswith("google_auth_oauthlib"):
                 del sys.modules[_mod]
-        sys.modules.pop("classpilot.oauth_web", None)
+        # fastmcp/pydantic/mcp are ALSO purged: other test files stub
+        # `fastmcp` as a bare, path-less fake module for unrelated
+        # reasons (see the same rationale throughout this file's
+        # comments). classpilot.oauth_web now transitively imports
+        # classpilot.mcp_auth (Phase 4), which does a real, unconditional
+        # `from fastmcp.server.auth import AccessToken, TokenVerifier` at
+        # module load — that needs the genuine package, not a stub.
+        for _mod in list(sys.modules):
+            if _mod == "fastmcp" or _mod.startswith("fastmcp.") \
+               or _mod == "pydantic" or _mod.startswith("pydantic.") \
+               or _mod == "mcp" or _mod.startswith("mcp.") \
+               or _mod == "dotenv" or _mod.startswith("dotenv.") \
+               or _mod == "pydantic_settings" or _mod.startswith("pydantic_settings."):
+                del sys.modules[_mod]
+        for _mod in ("classpilot.oauth_web", "classpilot.mcp_oauth_web", "classpilot.mcp_auth"):
+            sys.modules.pop(_mod, None)
 
         os.environ["DATABASE_URL"] = TEST_DATABASE_URL
 

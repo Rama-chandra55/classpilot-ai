@@ -179,9 +179,174 @@ nothing in `server.py`/`study_client.py` reads from that store yet — see
 "Manually testing two Google accounts" below for how to verify the flow
 itself, independent of the (still single-user) running app.
 
+**Phase 3 (done) — Multi-user identity threading**
+- `classpilot/identity.py` — `resolve_identity()`, the single seam every
+  MCP tool calls to find out who's asking. Never a tool parameter.
+- All 8 tools, `study_client.py`, the watcher, and the deadline scheduler
+  now use per-request identity + that user's own Google credentials —
+  `study_client.py` no longer imports the `token.json`-backed global
+  singleton at all.
+- `state_store.py`'s dedup tables are now physically isolated per user
+  (widened `PRIMARY KEY`s), with a safe, idempotent migration for
+  existing databases.
+- `AppServices`/watchers/scheduler are per-user — one student can never
+  start, stop, or affect another's watcher.
+
+**Phase 4 (done) — Remote MCP authentication**
+- `classpilot/mcp_auth.py` — ClassPilot-issued opaque MCP tokens (SHA-256
+  hashed at rest, never plaintext), verified via a custom FastMCP
+  `TokenVerifier`. A Google access/refresh token is never sent to an MCP
+  client — see "Remote MCP authentication" below for the full writeup.
+- `classpilot/mcp_oauth_web.py` — OAuth 2.1 + PKCE authorization server
+  surface (`/mcp/authorize`, `/mcp/token`, `/mcp/revoke`, `/mcp/register`,
+  discovery) an MCP client uses to obtain one of those tokens.
+- `resolve_identity()` now resolves from the authenticated MCP request by
+  default, failing closed on any unauthenticated request.
+
 **Not yet started:**
-- **Phase 3** — thread real per-user identity through `study_client.py`/`server.py`'s call path and the watcher's polling loop (the biggest, highest-risk step), and add MCP-facing OAuth 2.1 so Claude/Cursor/ChatGPT can each connect their own student
-- **Phase 4** — production deployment (real TLS host, managed Postgres, secrets manager, Google App Verification)
+- **Phase 5** — production deployment (real TLS host, managed Postgres,
+  secrets manager, Google App Verification, watcher scaling)
+
+---
+
+## Remote MCP authentication (Phase 4)
+
+Phase 4 replaces `CLASSPILOT_DEV_USER_ID` as the source of identity for
+remote requests: by default (`MCP_AUTH_MODE=remote`), ClassPilot only
+identifies a caller from a verified MCP access token on the request — an
+unauthenticated request is always rejected, and `CLASSPILOT_DEV_USER_ID`
+is ignored entirely. Set `MCP_AUTH_MODE=local_dev` to keep using the
+Phase 3 dev-user fallback for local stdio work.
+
+### Architecture
+
+ClassPilot runs **two separate OAuth relationships**, never conflated:
+
+```
+MCP client (Claude/Cursor/ChatGPT/...)
+      │  Authorization: Bearer <ClassPilot token>
+      ▼
+ClassPilot MCP server
+      │  looks up the ClassPilot token → resolves to a users.id
+      │  → that user's own stored Google credentials
+      ▼
+Google Classroom / Drive APIs
+```
+
+An MCP client authenticates to ClassPilot via a standards-track OAuth 2.1
++ PKCE flow that ClassPilot itself serves — it never sees a Google
+access or refresh token. Endpoints:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /.well-known/oauth-authorization-server` | RFC 8414 discovery |
+| `POST /mcp/register` | RFC 7591 dynamic client registration |
+| `GET /mcp/authorize` | Authorization (PKCE **S256 only** — `plain` is rejected) |
+| `POST /mcp/token` | Code → token, and refresh-token rotation |
+| `POST /mcp/revoke` | RFC 7009 revocation |
+
+**Why a custom `TokenVerifier` instead of FastMCP's `OAuthProxy`:** every
+FastMCP authentication advisory found while building this (CVE-2025-69196,
+CVE-2026-27124, AIKIDO-2026-10735) targets `OAuthProxy` specifically. The
+installed FastMCP is above all fixed versions, but issuing ClassPilot's
+own tokens against FastMCP's plain `TokenVerifier`/`RemoteAuthProvider`
+interfaces avoids that whole component. Tokens are stored as SHA-256
+hashes only — a database compromise yields hashes, not usable bearer
+tokens.
+
+### Known limitation: who is `login_hint`?
+
+`/mcp/authorize` identifies the end user by the `login_hint` email
+parameter (which must already be connected via `/auth/google/login`) —
+there is no logged-in browser session backing this yet. This is
+sufficient for individual/local use and for the client-integration
+testing below, but a real multi-tenant deployment should replace this
+with an actual authenticated session before Phase 5. Documented here
+rather than silently glossed over.
+
+### Client integration status
+
+Configuration was verified against each client's *current* documentation
+(not assumed from memory) as of this phase. All four expect the same
+discovery + OAuth 2.1 + PKCE flow described above.
+
+| Client | Status | Notes |
+|---|---|---|
+| **Claude** (claude.ai / Desktop) | Manual connection required (see below) | Uses the `/mcp/register` DCR endpoint automatically |
+| **Cursor** | Manual connection required (see below) | Also uses DCR |
+| **ChatGPT** | Manual connection required (see below) | Requires a paid tier + Developer Mode |
+| **Gemini** | Best-effort — see below | Consumer support is newer/less certain than the other three |
+
+#### Claude (claude.ai or Claude Desktop)
+
+1. Run `classpilot-ai-http` (or your deployed URL) with `MCP_AUTH_MODE=remote`
+   and `MCP_PUBLIC_BASE_URL` set to the real, reachable URL.
+2. In claude.ai: **Settings → Connectors → Add custom connector**. In
+   Claude Desktop: the equivalent connector settings.
+3. Paste the server URL (e.g. `https://your-host/mcp`).
+4. Click **Connect** — Claude performs DCR against `/mcp/register`, then
+   redirects you through `/mcp/authorize`.
+5. **Manual step required from you:** the authorize URL needs a
+   `login_hint` query parameter with the email you connected via
+   `/auth/google/login`. Depending on how your Claude client builds the
+   authorize request, you may need to complete `/auth/google/login`
+   first in a separate tab, then retry the connector.
+
+#### Cursor
+
+1. Add to `.cursor/mcp.json` (project or global):
+   ```json
+   {
+     "mcpServers": {
+       "classpilot": { "url": "https://your-host/mcp" }
+     }
+   }
+   ```
+2. Cursor auto-discovers the OAuth requirement from `/.well-known/oauth-authorization-server`
+   and attempts DCR via `/mcp/register`, same as Claude.
+3. Same manual `login_hint` note as above applies.
+
+#### ChatGPT
+
+1. Requires a paid tier (Plus/Pro/Business/Enterprise/Edu) — Developer
+   Mode is not available on the Free tier.
+2. **Settings → Connectors → Advanced → enable Developer Mode.**
+3. **Add custom connector** → paste the server URL → choose OAuth.
+4. ChatGPT performs the same discovery + DCR + PKCE flow.
+
+#### Gemini (best-effort)
+
+Gemini's consumer support for arbitrary custom MCP servers is newer and
+less uniformly documented than the other three. As of this phase:
+- **Gemini Spark** (a specific Gemini surface) has been reported to
+  support adding a custom MCP server URL under its connected-apps
+  settings.
+- **Gemini Enterprise** supports adding an MCP server under
+  **Settings & Help → Connected apps → Add MCP Server** (Streamable HTTP
+  only — no SSE transport).
+- The general-purpose Gemini chat app's support for arbitrary remote MCP
+  servers was **not confirmed** at the time of this writing.
+
+Treat Gemini integration as best-effort: validate against whichever
+Gemini surface you actually have access to, and expect this to need
+re-verification as Gemini's MCP support evolves.
+
+### Manual steps you need to perform
+
+1. **Set `MCP_PUBLIC_BASE_URL`** to your server's real, externally-reachable
+   URL (not `localhost`) before connecting any remote client — this value
+   is embedded in discovery metadata and audience binding.
+2. **Connect your Google account first**, via `classpilot-ai-oauth` →
+   `/auth/google/login`, exactly as in Phase 2 — the MCP OAuth flow only
+   issues a ClassPilot token for an email that already has stored Google
+   credentials.
+3. **Add `login_hint=<your connected email>`** to the authorization
+   request if your MCP client doesn't prompt for it automatically (see
+   the per-client notes above) — this is the known Phase 4 limitation.
+4. For each client, use its **current** "add custom/remote MCP server"
+   flow — the UI text and menu location changes fairly often; the
+   {URL} + OAuth 2.1 discovery mechanism described above is what stays
+   stable across client UI changes.
 
 ---
 

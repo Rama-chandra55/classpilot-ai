@@ -58,13 +58,19 @@ def main() -> None:
         host, port, path,
     )
 
-    # FastMCP 3.x: transport="streamable-http" → runs via uvicorn (Starlette/ASGI).
-    # host/port/path are forwarded directly to run_http_async().
-    mcp.run(
-        transport="streamable-http",
+    # FastMCP 3.x: transport="streamable-http" → we get the underlying Starlette app
+    # and combine it with our Phase 4 OAuth routes so everything is served from
+    # ONE unified origin.
+    import uvicorn
+    from .oauth_web import routes as oauth_routes
+
+    app = mcp.http_app(transport="streamable-http", path=path)
+    app.router.routes.extend(oauth_routes)
+
+    uvicorn.run(
+        app,
         host=host,
         port=port,
-        path=path,
     )
 
 

@@ -59,6 +59,70 @@ logger = logging.getLogger(__name__)
 
 # ── FastMCP instance ──────────────────────────────────────────────────────────
 
+def _build_auth_provider():
+    """
+    Build the MCP-facing auth provider (Phase 4).
+
+    Returns None in local_dev mode (stdio use during development, where
+    identity comes from CLASSPILOT_DEV_USER_ID and there is no HTTP
+    request to authenticate). In the default "remote" mode, returns a
+    RemoteAuthProvider wrapping ClassPilotTokenVerifier — FastMCP then
+    rejects unauthenticated requests with a 401 challenge before any tool
+    body runs, and publishes RFC 9728 protected-resource metadata so MCP
+    clients can discover where to authorize.
+
+    Deliberately NOT FastMCP's OAuthProxy — see classpilot/mcp_auth.py's
+    module docstring for the advisory history behind that choice.
+    """
+    from .config import get_config as _get_config
+    cfg = _get_config()
+    if cfg.is_local_dev_auth:
+        logger.warning(
+            "MCP_AUTH_MODE=local_dev — MCP requests are NOT authenticated. "
+            "Use this only for local development, never for a deployed server."
+        )
+        return None
+
+    try:
+        from fastmcp.server.auth import RemoteAuthProvider
+        from .mcp_auth import ClassPilotTokenVerifier, DEFAULT_MCP_SCOPES
+        from pydantic import AnyHttpUrl
+    except ImportError:
+        # fastmcp.server.auth (or pydantic) isn't really available in this
+        # process — this happens in test environments that stub `fastmcp`
+        # as a bare, path-less fake module for unrelated reasons (see the
+        # extensive sys.modules-stubbing notes throughout tests/). A real
+        # deployment always has the genuine package installed (it's a
+        # hard dependency; see pyproject.toml), so this can only trigger
+        # there if fastmcp itself is missing, which fails loudly elsewhere
+        # at import time anyway. Degrading to unauthenticated (auth=None)
+        # here, rather than crashing the whole module import, is safe
+        # specifically because MCP_AUTH_MODE still defaults to "remote" —
+        # resolve_identity() (classpilot/identity.py) fails closed on any
+        # unauthenticated request regardless of whether FastMCP itself
+        # enforces a 401 first. A genuine config/construction error inside
+        # RemoteAuthProvider/ClassPilotTokenVerifier is NOT swallowed here
+        # (only ImportError is) — it still raises and fails startup loudly.
+        logger.warning(
+            "fastmcp.server.auth is unavailable in this process — running "
+            "without FastMCP-level auth enforcement. resolve_identity() "
+            "still fails closed on unauthenticated requests. If this is a "
+            "real deployment, check your fastmcp installation."
+        )
+        return None
+
+    base_url = cfg.mcp_public_base_url
+    return RemoteAuthProvider(
+        token_verifier=ClassPilotTokenVerifier(
+            base_url=base_url, required_scopes=list(DEFAULT_MCP_SCOPES),
+        ),
+        # ClassPilot is its own authorization server for MCP clients.
+        authorization_servers=[AnyHttpUrl(base_url)],
+        base_url=base_url,
+        resource_name="ClassPilot AI",
+    )
+
+
 mcp = FastMCP(
     name="ClassPilot AI",
     instructions=(
@@ -69,6 +133,7 @@ mcp = FastMCP(
         "The assistant reads Google Docs and Slides content directly so you "
         "can ask questions about course materials without opening them manually."
     ),
+    auth=_build_auth_provider(),
 )
 
 

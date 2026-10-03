@@ -93,6 +93,33 @@ class ClassPilotConfig:
         default_factory=lambda: os.getenv("CLASSPILOT_DEV_USER_ID", "")
     )
 
+    # --- Phase 4: MCP-facing authentication ---
+    # "remote"  (DEFAULT, fail-closed): identity comes ONLY from a verified
+    #           MCP access token on the request. CLASSPILOT_DEV_USER_ID is
+    #           ignored entirely. Unauthenticated requests are rejected.
+    # "local_dev": identity falls back to CLASSPILOT_DEV_USER_ID when no
+    #           authenticated token is present. Intended ONLY for local
+    #           stdio use during development; never for a deployed server.
+    # Defaulting to "remote" means a misconfigured/forgotten setting fails
+    # closed (no access) rather than open (everyone acts as the dev user).
+    mcp_auth_mode: str = field(
+        default_factory=lambda: os.getenv("MCP_AUTH_MODE", "remote").strip().lower()
+    )
+    # Public base URL this MCP server is reachable at — used as the OAuth
+    # resource identifier (RFC 8707/9728 audience binding) and in discovery
+    # metadata. Must match what clients actually connect to.
+    mcp_public_base_url: str = field(
+        default_factory=lambda: os.getenv("MCP_PUBLIC_BASE_URL", "http://localhost:8000")
+    )
+    # Lifetime of ClassPilot-issued MCP access tokens (seconds).
+    mcp_access_token_ttl_seconds: int = field(
+        default_factory=lambda: int(os.getenv("MCP_ACCESS_TOKEN_TTL_SECONDS", "3600"))
+    )
+
+    @property
+    def is_local_dev_auth(self) -> bool:
+        return self.mcp_auth_mode == "local_dev"
+
     # --- Notifications ---
     notifier_backend: str = field(default_factory=lambda: os.getenv("NOTIFIER_BACKEND", "email"))
     smtp_host: str = field(default_factory=lambda: os.getenv("SMTP_HOST", ""))

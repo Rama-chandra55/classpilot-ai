@@ -39,7 +39,7 @@ def _stub(*names):
                     setattr(sys.modules[".".join(parts[:i - 1])], parts[i - 1], m)
 
 _stub(
-    "anthropic", "dotenv", "fastmcp",
+    "anthropic", "dotenv", "fastmcp", "fastmcp.server", "fastmcp.server.auth",
     "google.auth.transport.requests", "google.oauth2.credentials", "google.oauth2.id_token",
     "google_auth_oauthlib.flow",
     "googleapiclient.discovery", "googleapiclient.http", "googleapiclient.errors",
@@ -47,6 +47,8 @@ _stub(
     "apscheduler.executors.pool",
     "pydantic",
 )
+sys.modules["fastmcp.server.auth"].AccessToken = type("AccessToken", (), {})
+sys.modules["fastmcp.server.auth"].TokenVerifier = type("TokenVerifier", (), {})
 sys.modules["dotenv"].load_dotenv = lambda *a, **k: None
 
 # Minimal FastMCP stub — separate instance per server name so vendor
@@ -63,6 +65,16 @@ class _FakeMCP:
         return decorator
     def run(self, transport=None, **kwargs):
         self.run_calls.append({"transport": transport, **kwargs})
+    def http_app(self, transport=None, **kwargs):
+        self.run_calls.append({"method": "http_app", "transport": transport, **kwargs})
+        from starlette.applications import Starlette
+        from starlette.responses import Response, JSONResponse
+        from starlette.routing import Route
+        app = Starlette(routes=[
+            Route("/mcp", lambda r: Response(status_code=401, headers={"WWW-Authenticate": "Bearer"}), methods=["GET", "POST"]),
+            Route("/.well-known/oauth-protected-resource/mcp", lambda r: JSONResponse({"resource": "mock"}), methods=["GET"])
+        ])
+        return app
 
 _instances: dict = {}
 def _mcp_factory(name="", **k):
@@ -257,11 +269,14 @@ class TestHttpServerMain(unittest.TestCase):
                 if k == "MCP_HTTP_PATH": cfg.mcp_http_path = v
             with patch("classpilot.http_server.get_config", return_value=cfg):
                 with patch("classpilot.http_server.configure_logging"):
-                    http_srv.main()
+                    with patch("uvicorn.run") as mock_run:
+                        http_srv.main()
+                        self.mock_uvicorn_run = mock_run
 
     def test_main_calls_mcp_run(self):
         self._run_main()
         self.assertEqual(len(_fake_mcp_instance.run_calls), 1)
+        self.mock_uvicorn_run.assert_called_once()
 
     def test_transport_is_streamable_http(self):
         self._run_main()
@@ -270,11 +285,13 @@ class TestHttpServerMain(unittest.TestCase):
 
     def test_main_passes_default_host(self):
         self._run_main()
-        self.assertEqual(_fake_mcp_instance.run_calls[0]["host"], "127.0.0.1")
+        args, kwargs = self.mock_uvicorn_run.call_args
+        self.assertEqual(kwargs.get("host"), "127.0.0.1")
 
     def test_main_passes_default_port(self):
         self._run_main()
-        self.assertEqual(_fake_mcp_instance.run_calls[0]["port"], 8000)
+        args, kwargs = self.mock_uvicorn_run.call_args
+        self.assertEqual(kwargs.get("port"), 8000)
 
     def test_main_passes_default_path(self):
         self._run_main()
@@ -282,11 +299,13 @@ class TestHttpServerMain(unittest.TestCase):
 
     def test_main_passes_custom_host(self):
         self._run_main({"MCP_HTTP_HOST": "0.0.0.0"})
-        self.assertEqual(_fake_mcp_instance.run_calls[0]["host"], "0.0.0.0")
+        args, kwargs = self.mock_uvicorn_run.call_args
+        self.assertEqual(kwargs.get("host"), "0.0.0.0")
 
     def test_main_passes_custom_port(self):
         self._run_main({"MCP_HTTP_PORT": "9090"})
-        self.assertEqual(_fake_mcp_instance.run_calls[0]["port"], 9090)
+        args, kwargs = self.mock_uvicorn_run.call_args
+        self.assertEqual(kwargs.get("port"), 9090)
 
     def test_main_passes_custom_path(self):
         self._run_main({"MCP_HTTP_PATH": "/api/mcp"})
@@ -328,6 +347,53 @@ class TestNoCredentialExposure(unittest.TestCase):
             src = inspect.getsource(fn)
             self.assertNotIn("llm_api_key", src,
                              f"Tool '{name}' references llm_api_key")
+
+
+class TestUnifiedRouting(unittest.TestCase):
+    """Verify that the unified ASGI application exposes all required routes."""
+    def setUp(self):
+        _ensure_fake_mcp_active()
+
+    def test_all_required_routes_exist(self):
+        import classpilot.http_server as http_srv
+        from starlette.testclient import TestClient
+        
+        # Patch config and uvicorn.run, then capture the app passed to uvicorn
+        with patch.dict(os.environ, {"MCP_HTTP_PATH": "/mcp"}, clear=False):
+            with patch("classpilot.http_server.get_config", return_value=ClassPilotConfig()):
+                with patch("classpilot.http_server.configure_logging"):
+                    with patch("uvicorn.run") as mock_run:
+                        http_srv.main()
+                        app = mock_run.call_args[0][0]
+
+        client = TestClient(app)
+
+        # MCP endpoints (mocked above)
+        r = client.get("/mcp")
+        self.assertEqual(r.status_code, 401)
+        self.assertIn("WWW-Authenticate", r.headers)
+
+        r = client.get("/.well-known/oauth-protected-resource/mcp")
+        self.assertEqual(r.status_code, 200)
+
+        # OAuth endpoints
+        r = client.get("/.well-known/oauth-authorization-server")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("S256", r.json().get("code_challenge_methods_supported", []))
+
+        r = client.post("/mcp/register", json={})
+        self.assertEqual(r.status_code, 201)
+
+        r = client.get("/mcp/authorize")
+        # Fails validation without params, but endpoint exists
+        self.assertEqual(r.status_code, 400)
+
+        r = client.post("/mcp/token")
+        # Missing client_id
+        self.assertIn(r.status_code, (400, 401))
+
+        r = client.post("/mcp/revoke")
+        self.assertEqual(r.status_code, 200)
 
 
 if __name__ == "__main__":

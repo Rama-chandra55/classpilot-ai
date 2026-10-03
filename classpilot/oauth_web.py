@@ -135,9 +135,18 @@ async def google_callback(request: Request) -> HTMLResponse:
     )
 
 
+# The Google-facing routes above, plus the MCP-facing OAuth 2.1 routes
+# (Phase 4). They are deliberately separate modules and separate URL
+# namespaces — /auth/google/* authenticates ClassPilot TO Google, while
+# /mcp/* authenticates MCP CLIENTS to ClassPilot. Serving both from one
+# app is a deployment convenience, not a coupling: no Google token ever
+# crosses into an /mcp/* response.
+from .mcp_oauth_web import routes as _mcp_oauth_routes  # noqa: E402
+
 routes = [
     Route("/auth/google/login", google_login),
     Route("/auth/google/callback", google_callback),
+    *_mcp_oauth_routes,
 ]
 
 app = Starlette(routes=routes)

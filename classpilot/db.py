@@ -72,6 +72,48 @@ CREATE TABLE IF NOT EXISTS oauth_states (
     code_verifier TEXT NOT NULL,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Phase 4: ClassPilot-issued MCP access/refresh tokens.
+--
+-- These are ClassPilot's OWN tokens, issued to MCP clients (Claude,
+-- Cursor, ChatGPT, ...) — entirely separate from the Google tokens in
+-- google_oauth_credentials. An MCP client NEVER receives a Google
+-- access or refresh token; it receives one of these, which ClassPilot
+-- exchanges internally for that user's Google credentials on each call.
+--
+-- Only a SHA-256 hash of each token is stored, never the token itself:
+-- a database compromise must not yield usable bearer tokens. Lookup is
+-- by hash, so the plaintext only ever exists in the issuing response
+-- and in the client's own storage.
+CREATE TABLE IF NOT EXISTS mcp_access_tokens (
+    token_hash    TEXT PRIMARY KEY,           -- sha256(token), hex
+    user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    client_id     TEXT NOT NULL,
+    scopes        TEXT[] NOT NULL DEFAULT '{}',
+    token_type    TEXT NOT NULL DEFAULT 'access',  -- 'access' | 'refresh'
+    resource      TEXT,                       -- RFC 8707 audience binding
+    expires_at    TIMESTAMPTZ,
+    revoked_at    TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS mcp_access_tokens_user_id_idx
+    ON mcp_access_tokens (user_id);
+
+-- Phase 4: short-lived OAuth 2.1 authorization codes for the MCP-facing
+-- flow (PKCE-protected, single-use). Separate from oauth_states above,
+-- which belongs to the GOOGLE-facing flow.
+CREATE TABLE IF NOT EXISTS mcp_auth_codes (
+    code                  TEXT PRIMARY KEY,
+    user_id               UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    client_id             TEXT NOT NULL,
+    redirect_uri          TEXT NOT NULL,
+    code_challenge        TEXT NOT NULL,
+    code_challenge_method TEXT NOT NULL DEFAULT 'S256',
+    scopes                TEXT[] NOT NULL DEFAULT '{}',
+    resource              TEXT,
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 _pool: "ConnectionPool | None" = None
