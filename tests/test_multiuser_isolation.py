@@ -301,48 +301,49 @@ class TestMaterialAccessIsolation(_PostgresTestCase):
         self.assertEqual(captured, ["creds-A", "creds-B"])
 
 
-# ── State store physical isolation (SQLite — no Postgres needed) ───────────
+# ── State store physical isolation ───────────
 
-class TestStateStoreIsolation(unittest.TestCase):
+class TestStateStoreIsolation(_PostgresTestCase):
     """
-    The exact bug the widened PRIMARY KEY fixes: two students sharing a
-    course_id + assignment_id (Classroom IDs aren't per-student) must
+    Two students sharing a course_id + assignment_id must
     never overwrite or block each other's dedup state.
     """
 
     def setUp(self):
+        super().setUp()
         from classpilot.state_store import StateStore
-        self.db = tempfile.mktemp(suffix=".db")
-        self.store = StateStore(self.db)
-
-    def tearDown(self):
-        if os.path.exists(self.db):
-            os.remove(self.db)
+        self.store = StateStore()
 
     def test_known_assignment_upsert_does_not_overwrite_another_users_row(self):
-        self.store.upsert_assignment("c1", "a1", "A's title", None, None, user_id="userA")
-        self.store.upsert_assignment("c1", "a1", "B's title", None, None, user_id="userB")
+        userA = f"userA-{uuid.uuid4()}"
+        userB = f"userB-{uuid.uuid4()}"
+        self.store.upsert_assignment_metadata("c1", "a1", "A's title", None, None, user_id=userA)
+        self.store.upsert_assignment_metadata("c1", "a1", "B's title", None, None, user_id=userB)
 
-        row_a = self.store.get_known_assignment("c1", "a1", user_id="userA")
-        row_b = self.store.get_known_assignment("c1", "a1", user_id="userB")
+        row_a = self.store.get_known_assignment("c1", "a1", user_id=userA)
+        row_b = self.store.get_known_assignment("c1", "a1", user_id=userB)
         self.assertEqual(row_a["title"], "A's title")
         self.assertEqual(row_b["title"], "B's title")
 
     def test_reminder_dedup_is_independent_per_user_for_the_same_assignment(self):
-        self.store.mark_reminder_sent("c1", "a1", 60, user_id="userA")
-        self.assertTrue(self.store.has_sent_reminder("c1", "a1", 60, user_id="userA"))
-        self.assertFalse(self.store.has_sent_reminder("c1", "a1", 60, user_id="userB"))
+        userA = f"userA-{uuid.uuid4()}"
+        userB = f"userB-{uuid.uuid4()}"
+        self.store.mark_reminder_sent("c1", "a1", 60, user_id=userA)
+        self.assertTrue(self.store.has_sent_reminder("c1", "a1", 60, user_id=userA))
+        self.assertFalse(self.store.has_sent_reminder("c1", "a1", 60, user_id=userB))
 
-        self.store.mark_reminder_sent("c1", "a1", 60, user_id="userB")
-        self.assertTrue(self.store.has_sent_reminder("c1", "a1", 60, user_id="userB"))
+        self.store.mark_reminder_sent("c1", "a1", 60, user_id=userB)
+        self.assertTrue(self.store.has_sent_reminder("c1", "a1", 60, user_id=userB))
 
     def test_updating_users_own_assignment_repeatedly_does_not_affect_the_other_user(self):
-        self.store.upsert_assignment("c1", "a1", "A v1", None, None, user_id="userA")
-        self.store.upsert_assignment("c1", "a1", "B v1", None, None, user_id="userB")
-        self.store.upsert_assignment("c1", "a1", "A v2", {"year": 2027, "month": 1, "day": 1}, None, user_id="userA")
+        userA = f"userA-{uuid.uuid4()}"
+        userB = f"userB-{uuid.uuid4()}"
+        self.store.upsert_assignment_metadata("c1", "a1", "A v1", None, None, user_id=userA)
+        self.store.upsert_assignment_metadata("c1", "a1", "B v1", None, None, user_id=userB)
+        self.store.upsert_assignment_metadata("c1", "a1", "A v2", {"year": 2027, "month": 1, "day": 1}, None, user_id=userA)
 
-        self.assertEqual(self.store.get_known_assignment("c1", "a1", user_id="userA")["title"], "A v2")
-        self.assertEqual(self.store.get_known_assignment("c1", "a1", user_id="userB")["title"], "B v1")
+        self.assertEqual(self.store.get_known_assignment("c1", "a1", user_id=userA)["title"], "A v2")
+        self.assertEqual(self.store.get_known_assignment("c1", "a1", user_id=userB)["title"], "B v1")
 
 
 # ── Watcher isolation ────────────────────────────────────────────────────────
@@ -354,11 +355,8 @@ class TestWatcherIsolation(_PostgresTestCase):
         srv._user_services.clear()
         self.addCleanup(srv._user_services.clear)
 
-        with patch("classpilot.services.build_scheduler") as mock_build_sched, \
-             patch("classpilot.services.create_llm_provider", return_value=MagicMock()), \
+        with patch("classpilot.services.create_llm_provider", return_value=MagicMock()), \
              patch("classpilot.services.create_notifier", return_value=MagicMock()):
-            mock_apscheduler = MagicMock(running=True)
-            mock_build_sched.return_value = mock_apscheduler
 
             with patch.object(srv, "_resolve_credentials", return_value=(
                 MagicMock(user_id=user_a.id), "creds-A",
@@ -380,11 +378,8 @@ class TestWatcherIsolation(_PostgresTestCase):
         srv._user_services.clear()
         self.addCleanup(srv._user_services.clear)
 
-        with patch("classpilot.services.build_scheduler") as mock_build_sched, \
-             patch("classpilot.services.create_llm_provider", return_value=MagicMock()), \
+        with patch("classpilot.services.create_llm_provider", return_value=MagicMock()), \
              patch("classpilot.services.create_notifier", return_value=MagicMock()):
-            mock_apscheduler_a = MagicMock(running=True)
-            mock_build_sched.return_value = mock_apscheduler_a
             with patch.object(srv, "_resolve_credentials", return_value=(
                 MagicMock(user_id=user_a.id), "creds-A",
             )):
@@ -401,7 +396,6 @@ class TestWatcherIsolation(_PostgresTestCase):
 
         self.assertFalse(result.running)  # B never had one running
         self.assertTrue(srv._user_services[user_a.id].is_watcher_running)  # A's untouched
-        mock_apscheduler_a.shutdown.assert_not_called()
 
     def test_watcher_polls_classroom_with_its_owners_credentials(self):
         import classpilot.server as srv
@@ -409,8 +403,7 @@ class TestWatcherIsolation(_PostgresTestCase):
         srv._user_services.clear()
         self.addCleanup(srv._user_services.clear)
 
-        with patch("classpilot.services.build_scheduler"), \
-             patch("classpilot.services.create_llm_provider", return_value=MagicMock()), \
+        with patch("classpilot.services.create_llm_provider", return_value=MagicMock()), \
              patch("classpilot.services.create_notifier", return_value=MagicMock()), \
              patch.object(srv, "_resolve_credentials", return_value=(
                 MagicMock(user_id=user_a.id), "creds-A-object",
@@ -434,8 +427,7 @@ class TestCacheIsolation(_PostgresTestCase):
         identity_a = MagicMock(user_id=user_a.id)
         identity_b = MagicMock(user_id=user_b.id)
 
-        with patch("classpilot.services.build_scheduler"), \
-             patch("classpilot.services.create_llm_provider", return_value=MagicMock()), \
+        with patch("classpilot.services.create_llm_provider", return_value=MagicMock()), \
              patch("classpilot.services.create_notifier", return_value=MagicMock()):
             services_a = srv._get_user_services(identity_a, "creds-A")
             services_b = srv._get_user_services(identity_b, "creds-B")
@@ -453,8 +445,7 @@ class TestCacheIsolation(_PostgresTestCase):
         self.addCleanup(srv._user_services.clear)
 
         identity_a = MagicMock(user_id=user_a.id)
-        with patch("classpilot.services.build_scheduler"), \
-             patch("classpilot.services.create_llm_provider", return_value=MagicMock()), \
+        with patch("classpilot.services.create_llm_provider", return_value=MagicMock()), \
              patch("classpilot.services.create_notifier", return_value=MagicMock()):
             first = srv._get_user_services(identity_a, "creds-A")
             second = srv._get_user_services(identity_a, "creds-A")

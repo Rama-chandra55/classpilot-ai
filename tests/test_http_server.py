@@ -199,7 +199,6 @@ class TestHttpConfig(unittest.TestCase):
         cfg = self._fresh_config()
         self.assertIsNotNone(cfg.llm_provider)
         self.assertIsNotNone(cfg.watch_interval_minutes)
-        self.assertIsNotNone(cfg.state_db_path)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

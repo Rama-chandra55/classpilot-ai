@@ -114,6 +114,38 @@ CREATE TABLE IF NOT EXISTS mcp_auth_codes (
     resource              TEXT,
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Phase 5A: Persistent State Migration
+-- 
+-- Moved from SQLite (state_store.py) to PostgreSQL.
+-- Tracks known assignments and sent reminders to deduplicate notifications.
+CREATE TABLE IF NOT EXISTS known_assignments (
+    user_id         TEXT NOT NULL DEFAULT 'default',
+    course_id       TEXT NOT NULL,
+    assignment_id   TEXT NOT NULL,
+    title           TEXT,
+    due_date_json   TEXT,
+    due_time_json   TEXT,
+    first_seen_at   TIMESTAMPTZ DEFAULT now(),
+    last_updated_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (user_id, course_id, assignment_id)
+);
+
+CREATE TABLE IF NOT EXISTS sent_reminders (
+    user_id         TEXT NOT NULL DEFAULT 'default',
+    course_id       TEXT NOT NULL,
+    assignment_id   TEXT NOT NULL,
+    offset_minutes  INTEGER NOT NULL,
+    sent_at         TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (user_id, course_id, assignment_id, offset_minutes)
+);
+
+CREATE TABLE IF NOT EXISTS watcher_configs (
+    user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    enabled BOOLEAN NOT NULL DEFAULT false,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 _pool: "ConnectionPool | None" = None

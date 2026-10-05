@@ -5,48 +5,25 @@ Tracks which assignments we've already seen/notified about, and (for Feature 3
 later) which deadline reminders have already fired - so restarts and repeated
 polling never produce duplicate notifications.
 
-Multi-user isolation (Phase 3):
-  known_assignments and sent_reminders are now keyed by
-  (user_id, course_id, assignment_id[, offset_minutes]) — user_id is part
-  of the PRIMARY KEY, not just a plain column. This matters concretely:
-  two students enrolled in the SAME course see the SAME course_id and the
-  SAME assignment_id for a shared assignment (Classroom IDs aren't
-  per-student). Under the old (course_id, assignment_id)-only key, a
-  second student's poll would silently overwrite the first student's row
-  (`ON CONFLICT(course_id, assignment_id) DO UPDATE SET user_id =
-  excluded.user_id, ...`), and a second student's reminder-sent marker
-  could never be recorded at all if the first student's row already
-  occupied that key (`INSERT OR IGNORE` blocked by the PK collision) —
-  causing duplicate "new assignment" notifications for one student and
-  endlessly repeated reminders for the other. Widening the key makes this
-  physically impossible: every row is uniquely addressed per student.
+Phase 5A: Migrated to PostgreSQL.
+  - Removes local SQLite `.db` file dependence.
+  - Shares the `classpilot.db` process-wide connection pool.
+  - Uses `psycopg.rows.dict_row` at the cursor level to preserve the dict-like 
+    behavior expected by downstream consumers, without polluting the shared pool.
+  - Concurrency/thread-safety is handled natively by the connection pool.
 
-  Watchers/schedulers are user-scoped as of Phase 3 (see watcher.py,
-  deadline_scheduler.py, services.py) and now pass real user_id values
-  here — this is no longer schema-readiness-only, as it was in Phase 1.
-
-  Migration: see _migrate_add_user_id_column (pre-Phase-1 databases that
-  predate the user_id column entirely) and _migrate_widen_primary_key
-  (Phase 1/2 databases that have the column but not yet in the PRIMARY
-  KEY). Both are idempotent — safe to run on every process startup — and
-  detected via PRAGMA table_info rather than a version flag, so an
-  interrupted/partial upgrade can't leave the schema in an ambiguous
-  state.
-
-  This table deliberately stays on SQLite (unlike the users/
-  google_oauth_credentials tables in classpilot/db.py, which are
-  Postgres) — it's low-sensitivity operational dedup cache, not identity
-  or credential data, and there's no present need to add a second
-  database dependency just for this.
+Phase 5B: Job Concurrency
+  - Atomic claims (RETURNING 1) used to prevent duplicate LLM generation/emails.
 """
 
 import json
 import logging
-import sqlite3
-import threading
-from contextlib import contextmanager
-from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+
+import psycopg
+from psycopg.rows import dict_row
+
+from . import db
 
 logger = logging.getLogger(__name__)
 
@@ -56,155 +33,74 @@ logger = logging.getLogger(__name__)
 # of Phase 3.
 DEFAULT_USER_ID = "default"
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS known_assignments (
-    user_id         TEXT NOT NULL DEFAULT 'default',
-    course_id       TEXT NOT NULL,
-    assignment_id   TEXT NOT NULL,
-    title           TEXT,
-    due_date_json   TEXT,
-    due_time_json   TEXT,
-    first_seen_at   TEXT DEFAULT CURRENT_TIMESTAMP,
-    last_updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (user_id, course_id, assignment_id)
-);
-
-CREATE TABLE IF NOT EXISTS sent_reminders (
-    user_id         TEXT NOT NULL DEFAULT 'default',
-    course_id       TEXT NOT NULL,
-    assignment_id   TEXT NOT NULL,
-    offset_minutes  INTEGER NOT NULL,
-    sent_at         TEXT DEFAULT CURRENT_TIMESTAMP,
-    PRIMARY KEY (user_id, course_id, assignment_id, offset_minutes)
-);
-"""
-
 
 class StateStore:
     """
-    Thread-safe wrapper around a small SQLite database used for dedup state.
+    Wrapper around the Postgres database used for dedup state.
     """
 
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self._lock = threading.Lock()
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
+    def __init__(self):
+        # We no longer manage schema directly here. The tables are managed
+        # by classpilot.db._SCHEMA and init_schema().
+        pass
 
-    @contextmanager
-    def _connect(self):
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        try:
-            yield conn
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
+    # ---------- Watcher Enablement ----------
 
-    def _init_schema(self) -> None:
-        with self._lock, self._connect() as conn:
-            # Order matters: a database old enough to be missing user_id
-            # entirely must get the column added before we can consider
-            # widening the primary key to include it.
-            self._migrate_add_user_id_column(conn, "known_assignments")
-            self._migrate_add_user_id_column(conn, "sent_reminders")
-            self._migrate_widen_primary_key(
-                conn, "known_assignments",
-                new_pk=("user_id", "course_id", "assignment_id"),
-                columns=("user_id", "course_id", "assignment_id", "title",
-                         "due_date_json", "due_time_json", "first_seen_at", "last_updated_at"),
-            )
-            self._migrate_widen_primary_key(
-                conn, "sent_reminders",
-                new_pk=("user_id", "course_id", "assignment_id", "offset_minutes"),
-                columns=("user_id", "course_id", "assignment_id", "offset_minutes", "sent_at"),
-            )
-            conn.executescript(_SCHEMA)
-        logger.debug("State store schema ready at %s", self.db_path)
-
-    @staticmethod
-    def _migrate_add_user_id_column(conn: sqlite3.Connection, table: str) -> None:
-        """
-        Add a `user_id` column to a pre-Phase-1 table that predates it
-        entirely, so upgrading doesn't break on "no such column: user_id".
-        Every existing row becomes DEFAULT_USER_ID, matching the only
-        identity that could possibly have written it (this table's schema
-        had no user dimension at all before this migration existed).
-        """
-        cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
-        if not cols:
-            return  # table doesn't exist yet — _SCHEMA's CREATE TABLE will make it fresh, correctly
-        if "user_id" not in cols:
+    def set_watcher_enabled(self, user_id: str, enabled: bool) -> None:
+        """Toggle whether the background job should poll for this user."""
+        with db.get_connection() as conn:
             conn.execute(
-                f"ALTER TABLE {table} ADD COLUMN user_id TEXT NOT NULL DEFAULT '{DEFAULT_USER_ID}'"
+                """
+                INSERT INTO watcher_configs (user_id, enabled)
+                VALUES (%s, %s)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    enabled = EXCLUDED.enabled,
+                    updated_at = now()
+                """,
+                (user_id, enabled),
             )
-            logger.info("Migrated existing '%s' table: added user_id column", table)
 
-    @staticmethod
-    def _migrate_widen_primary_key(
-        conn: sqlite3.Connection, table: str, new_pk: tuple[str, ...], columns: tuple[str, ...],
-    ) -> None:
-        """
-        Widen `table`'s PRIMARY KEY to include user_id (Phase 3), if it
-        doesn't already. Detected via PRAGMA table_info's `pk` column
-        (0 = not part of the key; 1, 2, 3... = position within it) rather
-        than a stored schema-version flag, so this is self-verifying and
-        safe to run on every startup — an interrupted upgrade just gets
-        retried, not skipped.
+    def get_watcher_enabled(self, user_id: str) -> bool:
+        """Check if a specific user has the watcher enabled."""
+        with db.get_connection() as conn:
+            row = conn.execute(
+                "SELECT enabled FROM watcher_configs WHERE user_id = %s",
+                (user_id,),
+            ).fetchone()
+            return bool(row[0]) if row else False
 
-        SQLite has no ALTER TABLE for primary keys, so this rebuilds the
-        table: create a correctly-keyed replacement, copy every row into
-        it, drop the old table, rename the replacement into place — done
-        as one atomic operation within the caller's transaction. This is
-        lossless and collision-free by construction: every existing row
-        was already unique under the OLD (narrower) key, so it stays
-        unique under the new, WIDER key too — widening a key can only
-        ever preserve uniqueness among rows that already satisfied a
-        subset of it, never create a new collision.
-        """
-        info = conn.execute(f"PRAGMA table_info({table})").fetchall()
-        if not info:
-            return  # table doesn't exist yet — _SCHEMA's CREATE TABLE will make it fresh, correctly
-
-        current_pk_cols = {row[1] for row in info if row[5] > 0}  # row[5] is the `pk` field
-        if current_pk_cols == set(new_pk):
-            return  # already widened — idempotent no-op
-
-        tmp_table = f"{table}__migrating"
-        conn.execute(f"DROP TABLE IF EXISTS {tmp_table}")  # in case a prior attempt was interrupted
-
-        # Build the replacement table's DDL by re-using _SCHEMA's own
-        # column definitions for this table, but with the NEW primary key
-        # — extracted at call time so this stays a single source of truth
-        # rather than a second, hand-copied CREATE TABLE statement.
-        create_stmt = _extract_create_table(table, new_pk)
-        conn.execute(create_stmt.replace(f"TABLE IF NOT EXISTS {table}", f"TABLE {tmp_table}"))
-
-        col_list = ", ".join(columns)
-        conn.execute(f"INSERT INTO {tmp_table} ({col_list}) SELECT {col_list} FROM {table}")
-        conn.execute(f"DROP TABLE {table}")
-        conn.execute(f"ALTER TABLE {tmp_table} RENAME TO {table}")
-        logger.info(
-            "Migrated existing '%s' table: widened PRIMARY KEY to include user_id (%s)",
-            table, ", ".join(new_pk),
-        )
+    def get_enabled_watchers(self) -> List[str]:
+        """Return a list of user_ids that have the watcher enabled."""
+        with db.get_connection() as conn:
+            rows = conn.execute(
+                "SELECT user_id::text FROM watcher_configs WHERE enabled = true"
+            ).fetchall()
+            return [str(row[0]) for row in rows]
 
     # ---------- Assignment tracking (Feature 1) ----------
 
     def get_known_assignment(
         self, course_id: str, assignment_id: str, user_id: str = DEFAULT_USER_ID
     ) -> Optional[Dict[str, Any]]:
-        with self._lock, self._connect() as conn:
-            row = conn.execute(
-                "SELECT * FROM known_assignments WHERE user_id = ? AND course_id = ? AND assignment_id = ?",
-                (user_id, course_id, assignment_id),
-            ).fetchone()
-            return dict(row) if row else None
+        with db.get_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                row = cursor.execute(
+                    "SELECT * FROM known_assignments WHERE user_id = %s AND course_id = %s AND assignment_id = %s",
+                    (user_id, course_id, assignment_id),
+                ).fetchone()
+                return dict(row) if row else None
 
-    def upsert_assignment(
+    def get_all_assignments(self, user_id: str) -> List[Dict[str, Any]]:
+        """Return all known assignments for a user (used to evaluate upcoming deadlines)."""
+        with db.get_connection() as conn:
+            with conn.cursor(row_factory=dict_row) as cursor:
+                rows = cursor.execute(
+                    "SELECT * FROM known_assignments WHERE user_id = %s",
+                    (user_id,),
+                ).fetchall()
+                return [dict(row) for row in rows]
+
+    def upsert_assignment_metadata(
         self,
         course_id: str,
         assignment_id: str,
@@ -213,17 +109,21 @@ class StateStore:
         due_time: Optional[dict],
         user_id: str = DEFAULT_USER_ID,
     ) -> None:
-        with self._lock, self._connect() as conn:
+        """
+        Legacy upsert for purely keeping title/metadata up to date
+        without triggering notification semantics.
+        """
+        with db.get_connection() as conn:
             conn.execute(
                 """
                 INSERT INTO known_assignments
                     (user_id, course_id, assignment_id, title, due_date_json, due_time_json)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(user_id, course_id, assignment_id) DO UPDATE SET
-                    title = excluded.title,
-                    due_date_json = excluded.due_date_json,
-                    due_time_json = excluded.due_time_json,
-                    last_updated_at = CURRENT_TIMESTAMP
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id, course_id, assignment_id) DO UPDATE SET
+                    title = EXCLUDED.title,
+                    due_date_json = EXCLUDED.due_date_json,
+                    due_time_json = EXCLUDED.due_time_json,
+                    last_updated_at = now()
                 """,
                 (
                     user_id,
@@ -235,16 +135,95 @@ class StateStore:
                 ),
             )
 
+    def record_new_assignment(
+        self,
+        course_id: str,
+        assignment_id: str,
+        title: str,
+        due_date: Optional[dict],
+        due_time: Optional[dict],
+        user_id: str = DEFAULT_USER_ID,
+    ) -> bool:
+        """
+        Atomic claim for a new assignment.
+        Returns True ONLY if this exact invocation inserted the row.
+        """
+        with db.get_connection() as conn:
+            row = conn.execute(
+                """
+                INSERT INTO known_assignments
+                    (user_id, course_id, assignment_id, title, due_date_json, due_time_json)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING 1
+                """,
+                (
+                    user_id,
+                    course_id,
+                    assignment_id,
+                    title,
+                    json.dumps(due_date) if due_date else None,
+                    json.dumps(due_time) if due_time else None,
+                ),
+            ).fetchone()
+            return row is not None
+
+    def update_assignment_deadline(
+        self,
+        course_id: str,
+        assignment_id: str,
+        title: str,
+        new_due_date: Optional[dict],
+        new_due_time: Optional[dict],
+        old_due_date_json: Optional[str],
+        old_due_time_json: Optional[str],
+        user_id: str = DEFAULT_USER_ID,
+    ) -> bool:
+        """
+        Optimistic concurrency claim for a deadline change.
+        Returns True ONLY if this exact invocation changed the deadline.
+        """
+        with db.get_connection() as conn:
+            # We match on the exact old JSON string we observed. If another
+            # worker changed it first, this UPDATE affects 0 rows.
+            # (Note: we use IS NOT DISTINCT FROM to safely match NULLs in Postgres)
+            row = conn.execute(
+                """
+                UPDATE known_assignments SET
+                    title = %s,
+                    due_date_json = %s,
+                    due_time_json = %s,
+                    last_updated_at = now()
+                WHERE user_id = %s
+                  AND course_id = %s
+                  AND assignment_id = %s
+                  AND due_date_json IS NOT DISTINCT FROM %s
+                  AND due_time_json IS NOT DISTINCT FROM %s
+                RETURNING 1
+                """,
+                (
+                    title,
+                    json.dumps(new_due_date) if new_due_date else None,
+                    json.dumps(new_due_time) if new_due_time else None,
+                    user_id,
+                    course_id,
+                    assignment_id,
+                    old_due_date_json,
+                    old_due_time_json,
+                ),
+            ).fetchone()
+            return row is not None
+
     # ---------- Reminder dedup (Feature 3, used later) ----------
 
     def has_sent_reminder(
         self, course_id: str, assignment_id: str, offset_minutes: int, user_id: str = DEFAULT_USER_ID
     ) -> bool:
-        with self._lock, self._connect() as conn:
+        with db.get_connection() as conn:
             row = conn.execute(
                 """
                 SELECT 1 FROM sent_reminders
-                WHERE user_id = ? AND course_id = ? AND assignment_id = ? AND offset_minutes = ?
+                WHERE user_id = %s AND course_id = %s AND assignment_id = %s AND offset_minutes = %s
                 """,
                 (user_id, course_id, assignment_id, offset_minutes),
             ).fetchone()
@@ -252,34 +231,19 @@ class StateStore:
 
     def mark_reminder_sent(
         self, course_id: str, assignment_id: str, offset_minutes: int, user_id: str = DEFAULT_USER_ID
-    ) -> None:
-        with self._lock, self._connect() as conn:
-            conn.execute(
+    ) -> bool:
+        """
+        Atomic claim for sending a reminder.
+        Returns True ONLY if this exact invocation inserted the row.
+        """
+        with db.get_connection() as conn:
+            row = conn.execute(
                 """
-                INSERT OR IGNORE INTO sent_reminders (user_id, course_id, assignment_id, offset_minutes)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO sent_reminders (user_id, course_id, assignment_id, offset_minutes)
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT DO NOTHING
+                RETURNING 1
                 """,
                 (user_id, course_id, assignment_id, offset_minutes),
-            )
-
-
-def _extract_create_table(table: str, new_pk: tuple[str, ...]) -> str:
-    """
-    Pull `table`'s CREATE TABLE statement out of the module-level _SCHEMA
-    (the single source of truth for both tables' column definitions) and
-    confirm its PRIMARY KEY matches `new_pk` — used by
-    _migrate_widen_primary_key so the migration's replacement table can
-    never drift out of sync with the real, current schema definition.
-    """
-    marker = f"CREATE TABLE IF NOT EXISTS {table} ("
-    start = _SCHEMA.index(marker)
-    end = _SCHEMA.index(");", start) + 2
-    stmt = _SCHEMA[start:end]
-    expected_pk = f"PRIMARY KEY ({', '.join(new_pk)})"
-    assert expected_pk in stmt, (
-        f"_SCHEMA's {table} definition doesn't match the requested PK {new_pk} — "
-        "update _SCHEMA and this migration together."
-    )
-    return stmt
-
-
+            ).fetchone()
+            return row is not None

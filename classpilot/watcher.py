@@ -148,12 +148,13 @@ class AssignmentWatcher:
         known = self._state.get_known_assignment(course_id, assignment_id, user_id=self._user_id)
 
         if known is None:
-            # Brand new assignment we've never recorded before (for THIS user —
-            # another user sharing this same course_id/assignment_id has
-            # entirely independent dedup state; see state_store.py).
-            self._state.upsert_assignment(
+            # Brand new assignment we've never recorded before
+            won = self._state.record_new_assignment(
                 course_id, assignment_id, title, due_date, due_time, user_id=self._user_id,
             )
+            if not won:
+                # Another worker claimed it first
+                return None
             logger.info("New assignment detected: %s (%s)", title, course_name)
             return AssignmentEvent(
                 kind="new",
@@ -170,9 +171,15 @@ class AssignmentWatcher:
         prev_due_time = json.loads(known["due_time_json"]) if known["due_time_json"] else None
 
         if prev_due_date != due_date or prev_due_time != due_time:
-            self._state.upsert_assignment(
-                course_id, assignment_id, title, due_date, due_time, user_id=self._user_id,
+            won = self._state.update_assignment_deadline(
+                course_id, assignment_id, title, due_date, due_time, 
+                old_due_date_json=known["due_date_json"], 
+                old_due_time_json=known["due_time_json"], 
+                user_id=self._user_id,
             )
+            if not won:
+                # Another worker changed the deadline first
+                return None
             logger.info("Deadline change detected: %s (%s)", title, course_name)
             return AssignmentEvent(
                 kind="deadline_updated",

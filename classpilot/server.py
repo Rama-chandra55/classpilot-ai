@@ -626,12 +626,11 @@ def start_assignment_watcher() -> WatcherResult:
     svc = _get_user_services(identity, credentials)
     if svc.is_watcher_running:
         return WatcherResult(running=True, message="Watcher is already running.")
-    svc.start_background_scheduler()
+    svc.enable_watcher()
     return WatcherResult(
         running=True,
         message=(
-            f"✅ Assignment watcher started. Polling every "
-            f"{svc.config.watch_interval_minutes} minutes."
+            f"✅ Assignment watcher enabled. It will run automatically in the background."
         ),
     )
 
@@ -643,8 +642,8 @@ def stop_assignment_watcher() -> WatcherResult:
     svc = _get_user_services(identity, credentials)
     if not svc.is_watcher_running:
         return WatcherResult(running=False, message="Watcher was not running.")
-    svc.stop_scheduler()
-    return WatcherResult(running=False, message="⏹ Assignment watcher stopped.")
+    svc.disable_watcher()
+    return WatcherResult(running=False, message="⏹ Assignment watcher disabled.")
 
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────

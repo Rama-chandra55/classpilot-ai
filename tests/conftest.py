@@ -31,6 +31,7 @@ _stub_module(
     "fastmcp.utilities.types",
     "google.auth.transport.requests",
     "google.oauth2.credentials",
+    "google.oauth2.id_token",
     "google_auth_oauthlib.flow",
     "googleapiclient.discovery",
     "googleapiclient.http",
@@ -66,6 +67,7 @@ sys.modules["fastmcp.utilities.types"].Image = _FakeImage
 sys.modules["google.auth.transport.requests"].Request = object
 sys.modules["google.oauth2.credentials"].Credentials = object
 sys.modules["google_auth_oauthlib.flow"].InstalledAppFlow = object
+sys.modules["google_auth_oauthlib.flow"].Flow = object
 disc = sys.modules["googleapiclient.discovery"]
 disc.build = lambda *a, **k: None
 disc.Resource = object

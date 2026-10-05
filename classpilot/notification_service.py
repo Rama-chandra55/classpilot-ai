@@ -28,6 +28,7 @@ _SIGNATURE = "\n\n— ClassPilot AI 🤖"
 _SUBJECTS = {
     EventType.NEW_ASSIGNMENT: "📚 New Assignment: {assignment_name}",
     EventType.DEADLINE_REMINDER: "⏰ Deadline Reminder: {assignment_name}",
+    EventType.DEADLINE_UPDATED: "⏳ Deadline Changed: {assignment_name}",
     EventType.SUBMISSION_SUCCESS: "✅ Submitted: {assignment_name}",
 }
 

@@ -148,8 +148,8 @@ class TestConsumeStateReturnsCodeVerifier(_PostgresTestCase):
         from classpilot.oauth_state import generate_state, register_state, consume_state
         state = generate_state()
         register_state(state, "verifier")
-        # ttl_seconds=0 -> "created_at > now() - 0 seconds" is false immediately
-        self.assertIsNone(consume_state(state, ttl_seconds=0))
+        # ttl_seconds=-1 guarantees expiration even if DB and Python clocks drift slightly
+        self.assertIsNone(consume_state(state, ttl_seconds=-1))
 
     def test_expired_state_is_deleted_even_though_rejected(self):
         """consume_state deletes the row unconditionally, whether or not

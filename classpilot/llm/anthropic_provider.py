@@ -44,6 +44,10 @@ _EVENT_HINTS = {
         "The deadline for '{assignment_name}' is approaching. "
         "Nudge the student to get moving."
     ),
+    EventType.DEADLINE_UPDATED: (
+        "The deadline for '{assignment_name}' was just changed by the professor. "
+        "React to the deadline change."
+    ),
     EventType.SUBMISSION_SUCCESS: (
         "The student just successfully submitted '{assignment_name}'. "
         "Congratulate them."

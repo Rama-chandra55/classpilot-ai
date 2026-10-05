@@ -78,12 +78,61 @@ class FakeNotifier(Notifier):
             raise NotifierError("SMTP unavailable")
         self.sent.append({"subject": subject, "body": body})
 
+class MockStateStore:
+    def __init__(self):
+        self.known = {}
+        self.sent = set()
+    def get_known_assignment(self, cid, aid, user_id="default"):
+        return self.known.get((user_id, cid, aid))
+    
+    def upsert_assignment_metadata(self, cid, aid, title, ddate, dtime, user_id="default"):
+        import json
+        self.known[(user_id, cid, aid)] = {
+            "title": title,
+            "due_date_json": json.dumps(ddate) if ddate else None,
+            "due_time_json": json.dumps(dtime) if dtime else None
+        }
+
+    def record_new_assignment(self, cid, aid, title, ddate, dtime, user_id="default"):
+        key = (user_id, cid, aid)
+        if key in self.known:
+            return False
+        import json
+        self.known[key] = {
+            "title": title,
+            "due_date_json": json.dumps(ddate) if ddate else None,
+            "due_time_json": json.dumps(dtime) if dtime else None
+        }
+        return True
+        
+    def update_assignment_deadline(self, cid, aid, title, ndate, ntime, old_due_date_json, old_due_time_json, user_id="default"):
+        key = (user_id, cid, aid)
+        if key not in self.known:
+            return False
+        if self.known[key]["due_date_json"] != old_due_date_json or self.known[key]["due_time_json"] != old_due_time_json:
+            return False
+        import json
+        self.known[key] = {
+            "title": title,
+            "due_date_json": json.dumps(ndate) if ndate else None,
+            "due_time_json": json.dumps(ntime) if ntime else None
+        }
+        return True
+
+    def has_sent_reminder(self, cid, aid, off, user_id="default"):
+        return (user_id, cid, aid, off) in self.sent
+    def mark_reminder_sent(self, cid, aid, off, user_id="default"):
+        key = (user_id, cid, aid, off)
+        if key in self.sent:
+            return False
+        self.sent.add(key)
+        return True
+
 def _make_watcher(assignments):
     import classpilot.watcher as wm
     wm.study_client.fetch_courses = lambda credentials, page_size=100: [{"id": "c1", "name": "DBMS"}]
     wm.study_client.fetch_assignments = lambda credentials, course_id, topic_id=None: assignments
-    db = tempfile.mktemp(suffix=".db")
-    return StateStore(db), db
+    return MockStateStore(), None
 
 
 class NullDeadlineScheduler:
@@ -303,7 +352,6 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(llm.calls[0][0], EventType.NEW_ASSIGNMENT)
         self.assertEqual(llm.calls[0][1], "DBMS HW1")
         self.assertEqual(len(n.sent), 1)
-        os.remove(db)
 
     def test_idle_polls_are_completely_silent(self):
         assignments = [dict(self.BASE)]
@@ -316,7 +364,6 @@ class TestEndToEnd(unittest.TestCase):
         watcher.check_once()
         self.assertEqual(len(llm.calls), 1, "LLM called on idle poll — bug")
         self.assertEqual(len(n.sent), 1,    "Email sent on idle poll — bug")
-        os.remove(db)
 
     def test_deadline_change_does_not_notify_in_feature2(self):
         assignments = [dict(self.BASE)]
@@ -330,7 +377,6 @@ class TestEndToEnd(unittest.TestCase):
         watcher.check_once()
         self.assertEqual(len(llm.calls), calls_after_first, "LLM fired on deadline_updated — F3 only")
         self.assertEqual(len(n.sent), 1,                    "Email fired on deadline_updated — F3 only")
-        os.remove(db)
 
     def test_multiple_assignments_each_get_notification(self):
         assignments = [
@@ -349,7 +395,6 @@ class TestEndToEnd(unittest.TestCase):
         self.assertIn("DBMS HW1", names)
         self.assertIn("OS Project", names)
         self.assertIn("CN Lab", names)
-        os.remove(db)
 
     def test_dedup_across_restarts(self):
         """StateStore on same DB file prevents re-notification after process restart."""
@@ -362,14 +407,13 @@ class TestEndToEnd(unittest.TestCase):
         self.assertEqual(len(llm.calls), 1)
 
         # Simulate restart: new watcher, same DB
-        store2 = StateStore(db)
+        store2 = store
         llm2, n2 = FakeLLM(), FakeNotifier()
         svc2 = NotificationService(llm2, n2)
         watcher2 = AssignmentWatcher(store2, on_event=build_handle_event(svc2, NullDeadlineScheduler()), credentials="fake-creds")
         watcher2.check_once()
         self.assertEqual(len(llm2.calls), 0, "Re-notified after restart — dedup bug")
         self.assertEqual(len(n2.sent),    0, "Re-emailed after restart — dedup bug")
-        os.remove(db)
 
 
 if __name__ == "__main__":

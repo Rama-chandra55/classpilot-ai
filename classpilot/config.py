@@ -35,12 +35,6 @@ class ClassPilotConfig:
     # --- Deadline alert offsets (minutes before due time) ---
     deadline_alert_offsets_minutes: tuple = (24 * 60, 6 * 60, 60, 15)
 
-    # --- State storage (SQLite — watcher/deadline dedup cache; unrelated to
-    #     the new Postgres-backed user/credential store below) ---
-    state_db_path: str = field(
-        default_factory=lambda: os.getenv("STATE_DB_PATH", "classpilot_state.db")
-    )
-
     # --- Multi-user persistence foundation (Phase 1) ---
     # Postgres holds `users` and their encrypted Google OAuth credentials.
     # Not yet wired into the live single-user auth flow (vendor auth.py /
