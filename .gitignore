@@ -1,6 +1,5 @@
 # Sensitive credentials - NEVER commit these
 .env
-.env.example
 google_web_credentials.json
 credentials.json
 token.json

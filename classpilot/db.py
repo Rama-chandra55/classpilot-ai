@@ -157,9 +157,15 @@ def get_pool() -> ConnectionPool:
     background) on first call."""
     global _pool
     if _pool is None:
-        dsn = get_config().database_url
-        _pool = ConnectionPool(conninfo=dsn, min_size=1, max_size=10, open=True)
-        logger.debug("Postgres connection pool created")
+        cfg = get_config()
+        dsn = cfg.database_url
+        _pool = ConnectionPool(
+            conninfo=dsn,
+            min_size=cfg.db_pool_min_size,
+            max_size=cfg.db_pool_max_size,
+            open=True
+        )
+        logger.debug("Postgres connection pool created (min=%s, max=%s)", cfg.db_pool_min_size, cfg.db_pool_max_size)
     return _pool
 
 

@@ -46,6 +46,15 @@ class ClassPilotConfig:
             "postgresql://classpilot:classpilot@localhost:5432/classpilot" if not os.getenv("K_SERVICE") else ""
         )
     )
+    
+    # --- Database Connection Pool ---
+    db_pool_min_size: int = field(
+        default_factory=lambda: int(os.getenv("DB_POOL_MIN_SIZE", "0" if os.getenv("K_SERVICE") else "1"))
+    )
+    db_pool_max_size: int = field(
+        default_factory=lambda: int(os.getenv("DB_POOL_MAX_SIZE", "5" if os.getenv("K_SERVICE") else "10"))
+    )
+
     # Fernet key (44-char urlsafe-base64 string from Fernet.generate_key()).
     # No default — classpilot/crypto.py raises a clear error if a caller
     # actually tries to encrypt/decrypt without one configured, rather than
@@ -148,11 +157,30 @@ class ClassPilotConfig:
                 "LLM_API_KEY is not set. Add it to your .env file "
                 "(this is the API key for whichever LLM_PROVIDER you configured)."
             )
-        if os.getenv("K_SERVICE") and not self.database_url:
-            raise ValueError(
-                "DATABASE_URL must be explicitly set in production (Cloud Run). "
-                "Localhost fallback is disabled."
-            )
+        # 1. Pool bounds check
+        if self.db_pool_min_size < 0:
+            raise ValueError("DB_POOL_MIN_SIZE cannot be negative.")
+        if self.db_pool_max_size < 1:
+            raise ValueError("DB_POOL_MAX_SIZE must be at least 1.")
+        if self.db_pool_min_size > self.db_pool_max_size:
+            raise ValueError("DB_POOL_MIN_SIZE cannot be greater than DB_POOL_MAX_SIZE.")
+
+        # 2. Cloud Run (production) constraints
+        if os.getenv("K_SERVICE"):
+            if not self.database_url.strip():
+                raise ValueError(
+                    "DATABASE_URL must be explicitly set in production (Cloud Run). "
+                    "Localhost fallback is disabled."
+                )
+            if not self.token_encryption_key.strip():
+                raise ValueError("TOKEN_ENCRYPTION_KEY is strictly required in production.")
+            if self.mcp_auth_mode != "remote":
+                raise ValueError(
+                    "MCP_AUTH_MODE must be 'remote' in production. "
+                    f"Invalid value: {self.mcp_auth_mode}"
+                )
+            if self.classpilot_dev_user_id:
+                raise ValueError("CLASSPILOT_DEV_USER_ID is not allowed in production.")
 
 
 _config: "ClassPilotConfig | None" = None
