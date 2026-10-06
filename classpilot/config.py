@@ -42,7 +42,8 @@ class ClassPilotConfig:
     # will write to and read from.
     database_url: str = field(
         default_factory=lambda: os.getenv(
-            "DATABASE_URL", "postgresql://classpilot:classpilot@localhost:5432/classpilot"
+            "DATABASE_URL",
+            "postgresql://classpilot:classpilot@localhost:5432/classpilot" if not os.getenv("K_SERVICE") else ""
         )
     )
     # Fernet key (44-char urlsafe-base64 string from Fernet.generate_key()).
@@ -124,10 +125,14 @@ class ClassPilotConfig:
 
     # --- HTTP MCP transport (Streamable HTTP for remote clients) ---
     mcp_http_host: str = field(
-        default_factory=lambda: os.getenv("MCP_HTTP_HOST", "127.0.0.1")
+        default_factory=lambda: os.getenv(
+            "MCP_HTTP_HOST", "0.0.0.0" if os.getenv("PORT") else "127.0.0.1"
+        )
     )
     mcp_http_port: int = field(
-        default_factory=lambda: int(os.getenv("MCP_HTTP_PORT", "8000"))
+        default_factory=lambda: int(
+            os.getenv("PORT", os.getenv("MCP_HTTP_PORT", "8000"))
+        )
     )
     mcp_http_path: str = field(
         default_factory=lambda: os.getenv("MCP_HTTP_PATH", "/mcp")
@@ -142,6 +147,11 @@ class ClassPilotConfig:
             raise ValueError(
                 "LLM_API_KEY is not set. Add it to your .env file "
                 "(this is the API key for whichever LLM_PROVIDER you configured)."
+            )
+        if os.getenv("K_SERVICE") and not self.database_url:
+            raise ValueError(
+                "DATABASE_URL must be explicitly set in production (Cloud Run). "
+                "Localhost fallback is disabled."
             )
 
 

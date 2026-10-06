@@ -261,16 +261,17 @@ class TestHttpServerMain(unittest.TestCase):
         env = env_overrides or {}
         with patch.dict(os.environ, env, clear=False):
             # Patch get_config to return a fresh config with our overrides
-            cfg = ClassPilotConfig()
+            cfg = ClassPilotConfig(llm_api_key="mock")
             for k, v in env.items():
                 if k == "MCP_HTTP_HOST": cfg.mcp_http_host = v
                 if k == "MCP_HTTP_PORT": cfg.mcp_http_port = int(v)
                 if k == "MCP_HTTP_PATH": cfg.mcp_http_path = v
             with patch("classpilot.http_server.get_config", return_value=cfg):
                 with patch("classpilot.http_server.configure_logging"):
-                    with patch("uvicorn.run") as mock_run:
-                        http_srv.main()
-                        self.mock_uvicorn_run = mock_run
+                    with patch("classpilot.http_server.init_schema"):
+                        with patch("uvicorn.run") as mock_run:
+                            http_srv.main()
+                            self.mock_uvicorn_run = mock_run
 
     def test_main_calls_mcp_run(self):
         self._run_main()
@@ -359,11 +360,12 @@ class TestUnifiedRouting(unittest.TestCase):
         
         # Patch config and uvicorn.run, then capture the app passed to uvicorn
         with patch.dict(os.environ, {"MCP_HTTP_PATH": "/mcp"}, clear=False):
-            with patch("classpilot.http_server.get_config", return_value=ClassPilotConfig()):
+            with patch("classpilot.http_server.get_config", return_value=ClassPilotConfig(llm_api_key="mock")):
                 with patch("classpilot.http_server.configure_logging"):
-                    with patch("uvicorn.run") as mock_run:
-                        http_srv.main()
-                        app = mock_run.call_args[0][0]
+                    with patch("classpilot.http_server.init_schema"):
+                        with patch("uvicorn.run") as mock_run:
+                            http_srv.main()
+                            app = mock_run.call_args[0][0]
 
         client = TestClient(app)
 
@@ -374,6 +376,13 @@ class TestUnifiedRouting(unittest.TestCase):
 
         r = client.get("/.well-known/oauth-protected-resource/mcp")
         self.assertEqual(r.status_code, 200)
+
+        # Health endpoints
+        r = client.get("/health")
+        self.assertEqual(r.status_code, 200)
+        
+        r = client.get("/ready")
+        self.assertIn(r.status_code, (200, 503))
 
         # OAuth endpoints
         r = client.get("/.well-known/oauth-authorization-server")
@@ -393,6 +402,56 @@ class TestUnifiedRouting(unittest.TestCase):
 
         r = client.post("/mcp/revoke")
         self.assertEqual(r.status_code, 200)
+
+
+class TestHealthEndpoints(unittest.TestCase):
+    """Verify /health and /ready endpoints behave correctly."""
+    def setUp(self):
+        _ensure_fake_mcp_active()
+
+    def _get_app(self):
+        import classpilot.http_server as http_srv
+        with patch.dict(os.environ, {"MCP_HTTP_PATH": "/mcp"}, clear=False):
+            with patch("classpilot.http_server.get_config", return_value=ClassPilotConfig(llm_api_key="mock")):
+                with patch("classpilot.http_server.configure_logging"):
+                    with patch("classpilot.http_server.init_schema"):
+                        with patch("uvicorn.run") as mock_run:
+                            http_srv.main()
+                            return mock_run.call_args[0][0]
+
+    def test_health_returns_ok(self):
+        from starlette.testclient import TestClient
+        app = self._get_app()
+        client = TestClient(app)
+        r = client.get("/health")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"status": "ok"})
+
+    @patch("classpilot.http_server.get_connection")
+    def test_ready_returns_ok_when_db_up(self, mock_get_conn):
+        from starlette.testclient import TestClient
+        # Mock connection context manager
+        mock_conn = MagicMock()
+        mock_get_conn.return_value.__enter__.return_value = mock_conn
+        
+        app = self._get_app()
+        client = TestClient(app)
+        r = client.get("/ready")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json(), {"status": "ready"})
+        mock_conn.execute.assert_called_with("SELECT 1")
+
+    @patch("classpilot.http_server.get_connection")
+    def test_ready_returns_503_when_db_down(self, mock_get_conn):
+        from starlette.testclient import TestClient
+        # Simulate DB failure
+        mock_get_conn.side_effect = Exception("Connection refused")
+        
+        app = self._get_app()
+        client = TestClient(app)
+        r = client.get("/ready")
+        self.assertEqual(r.status_code, 503)
+        self.assertEqual(r.json(), {"status": "unavailable", "detail": "Database connection failed"})
 
 
 if __name__ == "__main__":

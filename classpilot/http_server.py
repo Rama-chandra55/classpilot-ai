@@ -34,8 +34,25 @@ import logging
 from .config import get_config
 from .logging_setup import configure_logging
 from .server import mcp          # reuse the existing FastMCP instance — no duplication
+from .db import init_schema, get_connection
 
 logger = logging.getLogger(__name__)
+
+
+async def health_check(request) -> "JSONResponse":
+    from starlette.responses import JSONResponse
+    return JSONResponse({"status": "ok"})
+
+
+async def readiness_check(request) -> "JSONResponse":
+    from starlette.responses import JSONResponse
+    try:
+        with get_connection() as conn:
+            conn.execute("SELECT 1")
+        return JSONResponse({"status": "ready"})
+    except Exception as exc:
+        logger.error("Readiness check failed: %s", exc)
+        return JSONResponse({"status": "unavailable", "detail": "Database connection failed"}, status_code=503)
 
 
 def main() -> None:
@@ -47,7 +64,11 @@ def main() -> None:
     no implicit dependency on FASTMCP_* env vars.
     """
     config = get_config()
+    config.validate()
     configure_logging(config.log_level)
+    
+    # Ensure database schema is ready before serving requests
+    init_schema()
 
     host = config.mcp_http_host
     port = config.mcp_http_port
@@ -62,10 +83,15 @@ def main() -> None:
     # and combine it with our Phase 4 OAuth routes so everything is served from
     # ONE unified origin.
     import uvicorn
+    from starlette.routing import Route
     from .oauth_web import routes as oauth_routes
 
     app = mcp.http_app(transport="streamable-http", path=path)
     app.router.routes.extend(oauth_routes)
+    app.router.routes.extend([
+        Route("/health", health_check),
+        Route("/ready", readiness_check),
+    ])
 
     uvicorn.run(
         app,
