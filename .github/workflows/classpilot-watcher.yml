@@ -1,0 +1,57 @@
+name: ClassPilot Watcher
+
+on:
+  schedule:
+    - cron: '7,37 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: classpilot-production-watcher
+  cancel-in-progress: false
+
+jobs:
+  run-watcher:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install .
+
+      - name: Create Google Credentials File
+        id: google-creds
+        run: |
+          CREDS_PATH="$RUNNER_TEMP/google_web_credentials.json"
+          printf '%s' "$GOOGLE_WEB_CREDENTIALS_JSON" > "$CREDS_PATH"
+          chmod 600 "$CREDS_PATH"
+          echo "CREDS_PATH=$CREDS_PATH" >> "$GITHUB_OUTPUT"
+        env:
+          GOOGLE_WEB_CREDENTIALS_JSON: ${{ secrets.GOOGLE_WEB_CREDENTIALS_JSON }}
+
+      - name: Run Background Watcher
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          TOKEN_ENCRYPTION_KEY: ${{ secrets.TOKEN_ENCRYPTION_KEY }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          GOOGLE_WEB_CREDENTIALS_PATH: ${{ steps.google-creds.outputs.CREDS_PATH }}
+          SMTP_HOST: ${{ vars.SMTP_HOST }}
+          SMTP_PORT: ${{ vars.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          # Make the vendored classroom_suite_mcp package available
+          PYTHONPATH: vendor_classroom_suite_mcp/src
+        run: |
+          python -m classpilot.job
