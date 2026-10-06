@@ -70,7 +70,13 @@ CREATE TABLE IF NOT EXISTS google_oauth_credentials (
 CREATE TABLE IF NOT EXISTS oauth_states (
     state         TEXT PRIMARY KEY,
     code_verifier TEXT NOT NULL,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    mcp_client_id TEXT,
+    mcp_redirect_uri TEXT,
+    mcp_code_challenge TEXT,
+    mcp_code_challenge_method TEXT,
+    mcp_state TEXT,
+    mcp_resource TEXT
 );
 
 -- Phase 4: ClassPilot-issued MCP access/refresh tokens.
@@ -204,6 +210,7 @@ def init_schema() -> None:
     with get_connection() as conn:
         conn.execute(_SCHEMA)
         _migrate_add_code_verifier_column(conn)
+        _migrate_add_mcp_columns(conn)
     logger.debug("Postgres schema ready")
 
 
@@ -228,3 +235,19 @@ def _migrate_add_code_verifier_column(conn: psycopg.Connection) -> None:
         conn.execute("ALTER TABLE oauth_states ADD COLUMN code_verifier TEXT NOT NULL DEFAULT ''")
         conn.execute("ALTER TABLE oauth_states ALTER COLUMN code_verifier DROP DEFAULT")
         logger.info("Migrated existing 'oauth_states' table: added code_verifier column")
+
+
+def _migrate_add_mcp_columns(conn: psycopg.Connection) -> None:
+    """Add MCP authorization context columns for Phase 5E (eliminating login_hint)."""
+    exists = conn.execute(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_name = 'oauth_states' AND column_name = 'mcp_client_id'"
+    ).fetchone()
+    if exists is None:
+        conn.execute("ALTER TABLE oauth_states ADD COLUMN mcp_client_id TEXT")
+        conn.execute("ALTER TABLE oauth_states ADD COLUMN mcp_redirect_uri TEXT")
+        conn.execute("ALTER TABLE oauth_states ADD COLUMN mcp_code_challenge TEXT")
+        conn.execute("ALTER TABLE oauth_states ADD COLUMN mcp_code_challenge_method TEXT")
+        conn.execute("ALTER TABLE oauth_states ADD COLUMN mcp_state TEXT")
+        conn.execute("ALTER TABLE oauth_states ADD COLUMN mcp_resource TEXT")
+        logger.info("Migrated existing 'oauth_states' table: added MCP columns")

@@ -87,7 +87,7 @@ async def google_callback(request: Request) -> HTMLResponse:
         )
 
     state = request.query_params.get("state")
-    code_verifier = consume_state(state)
+    code_verifier, mcp_context = consume_state(state)
     if code_verifier is None:
         return _html_page(
             "Sign-in link expired or invalid",
@@ -126,6 +126,30 @@ async def google_callback(request: Request) -> HTMLResponse:
             "support if this keeps happening.",
             ok=False,
         )
+
+    if mcp_context:
+        import secrets
+        from .db import get_connection
+        from .mcp_auth import DEFAULT_MCP_SCOPES
+        
+        mcp_code = secrets.token_urlsafe(32)
+        with get_connection() as conn:
+            conn.execute(
+                "INSERT INTO mcp_auth_codes "
+                "(code, user_id, client_id, redirect_uri, code_challenge, "
+                " code_challenge_method, scopes, resource) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (mcp_code, user.id, mcp_context["client_id"], mcp_context["redirect_uri"],
+                 mcp_context["code_challenge"], mcp_context["code_challenge_method"],
+                 list(DEFAULT_MCP_SCOPES), mcp_context["resource"]),
+            )
+            
+        redirect_uri = mcp_context["redirect_uri"]
+        sep = "&" if "?" in redirect_uri else "?"
+        location = f"{redirect_uri}{sep}code={mcp_code}"
+        if mcp_context["state"]:
+            location += f"&state={mcp_context['state']}"
+        return RedirectResponse(location, status_code=302)
 
     display = user.email or user.display_name or "your Google account"
     return _html_page(

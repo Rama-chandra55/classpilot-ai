@@ -113,7 +113,7 @@ class TestConsumeStateReturnsCodeVerifier(_PostgresTestCase):
         from classpilot.oauth_state import generate_state, register_state, consume_state
         state = generate_state()
         register_state(state, "the-exact-pkce-verifier-abc123")
-        self.assertEqual(consume_state(state), "the-exact-pkce-verifier-abc123")
+        self.assertEqual(consume_state(state), ("the-exact-pkce-verifier-abc123", None))
 
     def test_different_states_carry_independent_verifiers(self):
         from classpilot.oauth_state import generate_state, register_state, consume_state
@@ -121,35 +121,35 @@ class TestConsumeStateReturnsCodeVerifier(_PostgresTestCase):
         state_b = generate_state()
         register_state(state_a, "verifier-for-a")
         register_state(state_b, "verifier-for-b")
-        self.assertEqual(consume_state(state_b), "verifier-for-b")
-        self.assertEqual(consume_state(state_a), "verifier-for-a")
+        self.assertEqual(consume_state(state_b), ("verifier-for-b", None))
+        self.assertEqual(consume_state(state_a), ("verifier-for-a", None))
 
     def test_state_is_single_use(self):
         """The core CSRF guarantee: consuming a state a second time must fail."""
         from classpilot.oauth_state import generate_state, register_state, consume_state
         state = generate_state()
         register_state(state, "verifier")
-        self.assertEqual(consume_state(state), "verifier")
-        self.assertIsNone(consume_state(state))
+        self.assertEqual(consume_state(state), ("verifier", None))
+        self.assertEqual(consume_state(state), (None, None))
 
     def test_unknown_state_rejected(self):
         from classpilot.oauth_state import consume_state
-        self.assertIsNone(consume_state("forged-state-value-that-was-never-issued"))
+        self.assertEqual(consume_state("forged-state-value-that-was-never-issued"), (None, None))
 
     def test_empty_state_rejected(self):
         from classpilot.oauth_state import consume_state
-        self.assertIsNone(consume_state(""))
+        self.assertEqual(consume_state(""), (None, None))
 
     def test_none_state_rejected(self):
         from classpilot.oauth_state import consume_state
-        self.assertIsNone(consume_state(None))
+        self.assertEqual(consume_state(None), (None, None))
 
     def test_expired_state_rejected(self):
         from classpilot.oauth_state import generate_state, register_state, consume_state
         state = generate_state()
         register_state(state, "verifier")
         # ttl_seconds=-1 guarantees expiration even if DB and Python clocks drift slightly
-        self.assertIsNone(consume_state(state, ttl_seconds=-1))
+        self.assertEqual(consume_state(state, ttl_seconds=-1), (None, None))
 
     def test_expired_state_is_deleted_even_though_rejected(self):
         """consume_state deletes the row unconditionally, whether or not
@@ -161,15 +161,15 @@ class TestConsumeStateReturnsCodeVerifier(_PostgresTestCase):
         state = generate_state()
         register_state(state, "verifier")
         time.sleep(1.1)
-        self.assertIsNone(consume_state(state, ttl_seconds=1))    # expired -> rejected
-        self.assertIsNone(consume_state(state, ttl_seconds=600))  # already deleted -> still rejected
+        self.assertEqual(consume_state(state, ttl_seconds=1), (None, None))    # expired -> rejected
+        self.assertEqual(consume_state(state, ttl_seconds=600), (None, None))  # already deleted -> still rejected
 
     def test_state_not_expired_within_ttl(self):
         from classpilot.oauth_state import generate_state, register_state, consume_state
         state = generate_state()
         register_state(state, "verifier")
         time.sleep(0.05)
-        self.assertEqual(consume_state(state, ttl_seconds=600), "verifier")
+        self.assertEqual(consume_state(state, ttl_seconds=600), ("verifier", None))
 
     def test_code_verifier_survives_a_simulated_process_restart(self):
         """The whole reason this lives in Postgres rather than an
@@ -186,7 +186,7 @@ class TestConsumeStateReturnsCodeVerifier(_PostgresTestCase):
         db_mod.close_pool()  # simulate the pool/process being torn down
         # get_pool() lazily recreates it on next use — this is exactly
         # what happens across two separate real HTTP request handlers.
-        self.assertEqual(consume_state(state), "verifier-that-must-survive")
+        self.assertEqual(consume_state(state), ("verifier-that-must-survive", None))
 
 
 class TestPurgeExpiredStates(_PostgresTestCase):
@@ -202,7 +202,7 @@ class TestPurgeExpiredStates(_PostgresTestCase):
         state = generate_state()
         register_state(state, "verifier")
         purge_expired_states(ttl_seconds=600)  # generous TTL — nothing should be purged
-        self.assertEqual(consume_state(state), "verifier")  # still there
+        self.assertEqual(consume_state(state), ("verifier", None))  # still there
 
 
 if __name__ == "__main__":

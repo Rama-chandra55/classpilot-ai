@@ -57,53 +57,79 @@ def generate_state() -> str:
     return secrets.token_urlsafe(32)
 
 
-def register_state(state: str, code_verifier: str) -> None:
+def register_state(
+    state: str,
+    code_verifier: str,
+    mcp_client_id: Optional[str] = None,
+    mcp_redirect_uri: Optional[str] = None,
+    mcp_code_challenge: Optional[str] = None,
+    mcp_code_challenge_method: Optional[str] = None,
+    mcp_state: Optional[str] = None,
+    mcp_resource: Optional[str] = None,
+) -> None:
     """
     Persist a (state, code_verifier) pair for later, single-use retrieval
     by consume_state(). Called after build_authorization_url() has already
     embedded `state` in the URL and produced its matching `code_verifier`.
+    Optionally stores MCP authorization context to bridge the Google flow.
     """
     if not state or not code_verifier:
         raise ValueError("Both state and code_verifier are required and cannot be empty.")
     with get_connection() as conn:
         conn.execute(
-            "INSERT INTO oauth_states (state, code_verifier) VALUES (%s, %s)",
-            (state, code_verifier),
+            "INSERT INTO oauth_states (state, code_verifier, mcp_client_id, mcp_redirect_uri, mcp_code_challenge, mcp_code_challenge_method, mcp_state, mcp_resource) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (state, code_verifier, mcp_client_id, mcp_redirect_uri, mcp_code_challenge, mcp_code_challenge_method, mcp_state, mcp_resource),
         )
 
 
-def consume_state(state: str, ttl_seconds: int = DEFAULT_STATE_TTL_SECONDS) -> Optional[str]:
+def consume_state(state: str, ttl_seconds: int = DEFAULT_STATE_TTL_SECONDS) -> tuple[Optional[str], Optional[dict]]:
     """
     Validate and immediately invalidate a state token, returning its
-    associated code_verifier on success.
+    associated code_verifier on success, plus an optional dict of MCP
+    authorization context if this state was tied to an MCP login flow.
 
-    Returns the code_verifier string only if `state` was a real,
+    Returns (code_verifier, mcp_context_dict) only if `state` was a real,
     not-yet-consumed, not-expired token this server issued. The row is
     deleted unconditionally the moment it's looked up — whether it turns
     out to be valid or expired — so a state can never be consumed twice
     and an expired state can never later become "valid" simply because
     some future caller happens to check it with a larger ttl_seconds.
 
-    Returns None for anything else (missing, already used, expired, or
+    Returns (None, None) for anything else (missing, already used, expired, or
     forged): the caller (the callback route) must treat that as a hard
     rejection, not a retry, and must not attempt a token exchange at all
     (there is no code_verifier to use).
     """
     if not state:
-        return None
+        return None, None
     with get_connection() as conn:
         row = conn.execute(
-            "DELETE FROM oauth_states WHERE state = %s RETURNING created_at, code_verifier",
+            "DELETE FROM oauth_states WHERE state = %s RETURNING created_at, code_verifier, mcp_client_id, mcp_redirect_uri, mcp_code_challenge, mcp_code_challenge_method, mcp_state, mcp_resource",
             (state,),
         ).fetchone()
     if row is None:
         logger.warning("Rejected OAuth callback: state token missing or already used.")
-        return None
-    created_at, code_verifier = row
+        return None, None
+        
+    (created_at, code_verifier, mcp_client_id, mcp_redirect_uri, 
+     mcp_code_challenge, mcp_code_challenge_method, mcp_state, mcp_resource) = row
+     
     if datetime.now(timezone.utc) - created_at > timedelta(seconds=ttl_seconds):
         logger.warning("Rejected OAuth callback: state token expired.")
-        return None
-    return code_verifier
+        return None, None
+        
+    mcp_context = None
+    if mcp_client_id:
+        mcp_context = {
+            "client_id": mcp_client_id,
+            "redirect_uri": mcp_redirect_uri,
+            "code_challenge": mcp_code_challenge,
+            "code_challenge_method": mcp_code_challenge_method,
+            "state": mcp_state,
+            "resource": mcp_resource,
+        }
+    return code_verifier, mcp_context
 
 
 def purge_expired_states(ttl_seconds: int = DEFAULT_STATE_TTL_SECONDS) -> int:

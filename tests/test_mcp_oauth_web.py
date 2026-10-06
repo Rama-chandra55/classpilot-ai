@@ -114,9 +114,9 @@ class _McpOAuthWebTestCase(unittest.TestCase):
         store.save_google_credentials(user.id, refresh_token=refresh_token, scopes=["scope-a"])
         return user
 
-    def _authorize(self, login_hint, client_id="test-client", redirect_uri="https://client.example/callback"):
+    def _authorize(self, user=None, client_id="test-client", redirect_uri="https://client.example/callback"):
         verifier, challenge = _pkce_pair()
-        response = self.client.get(
+        auth_req_response = self.client.get(
             "/mcp/authorize",
             params={
                 "client_id": client_id,
@@ -124,10 +124,25 @@ class _McpOAuthWebTestCase(unittest.TestCase):
                 "code_challenge": challenge,
                 "code_challenge_method": "S256",
                 "state": "xyz",
-                "login_hint": login_hint,
             },
             follow_redirects=False,
         )
+        self.assertEqual(auth_req_response.status_code, 302)
+        location = auth_req_response.headers["location"]
+        # Extract state parameter from the Google auth URL
+        import urllib.parse
+        parsed = urllib.parse.urlparse(location)
+        query = urllib.parse.parse_qs(parsed.query)
+        google_state = query["state"][0]
+
+        # Simulate the user logging in to Google and being redirected to our callback.
+        # We patch complete_authorization to return the provided user.
+        from unittest.mock import patch
+        with patch.object(self.oauth_web_mod, "complete_authorization", return_value=user):
+            response = self.client.get(
+                f"/auth/google/callback?code=fake-google-code&state={google_state}",
+                follow_redirects=False
+            )
         return response, verifier
 
 
@@ -188,7 +203,7 @@ class TestDynamicClientRegistration(_McpOAuthWebTestCase):
         client_id = registration["client_id"]
         user = self._connect_user()
 
-        response, verifier = self._authorize(user.email, client_id=client_id)
+        response, verifier = self._authorize(user, client_id=client_id)
         self.assertEqual(response.status_code, 302)
         code = response.headers["location"].split("code=")[1].split("&")[0]
 
@@ -228,35 +243,18 @@ class TestAuthorizeEndpoint(_McpOAuthWebTestCase):
         })
         self.assertEqual(response.status_code, 400)
 
-    def test_missing_login_hint_rejected(self):
-        _, challenge = _pkce_pair()
-        response = self.client.get("/mcp/authorize", params={
-            "client_id": "c1", "redirect_uri": "https://client.example/cb",
-            "code_challenge": challenge, "code_challenge_method": "S256",
-        })
-        self.assertEqual(response.status_code, 400)
 
-    def test_unknown_login_hint_rejected(self):
-        response, _ = self._authorize("nobody@nowhere.com")
-        self.assertEqual(response.status_code, 403)
-
-    def test_user_with_no_google_credentials_rejected(self):
-        from classpilot.user_store import UserStore
-        import uuid
-        UserStore().get_or_create_user(f"sub-{uuid.uuid4()}", email="noaccount@school.edu")
-        response, _ = self._authorize("noaccount@school.edu")
-        self.assertEqual(response.status_code, 403)
 
     def test_valid_request_redirects_with_a_code(self):
         user = self._connect_user()
-        response, _ = self._authorize(user.email)
+        response, _ = self._authorize(user)
         self.assertEqual(response.status_code, 302)
         self.assertIn("code=", response.headers["location"])
         self.assertIn("state=xyz", response.headers["location"])
 
     def test_authorize_response_never_contains_a_google_token(self):
         user = self._connect_user(refresh_token="1//SUPER-SECRET-GOOGLE-TOKEN")
-        response, _ = self._authorize(user.email)
+        response, _ = self._authorize(user)
         self.assertNotIn("1//SUPER-SECRET-GOOGLE-TOKEN", response.headers.get("location", ""))
         self.assertNotIn("1//SUPER-SECRET-GOOGLE-TOKEN", response.text)
 
@@ -265,7 +263,7 @@ class TestAuthorizeEndpoint(_McpOAuthWebTestCase):
 
 class TestTokenEndpoint(_McpOAuthWebTestCase):
     def _get_code(self, user, client_id="test-client", redirect_uri="https://client.example/callback"):
-        response, verifier = self._authorize(user.email, client_id=client_id, redirect_uri=redirect_uri)
+        response, verifier = self._authorize(user, client_id=client_id, redirect_uri=redirect_uri)
         location = response.headers["location"]
         code = location.split("code=")[1].split("&")[0]
         return code, verifier
@@ -380,7 +378,7 @@ class TestRevokeEndpoint(_McpOAuthWebTestCase):
         import asyncio
         from classpilot.mcp_auth import ClassPilotTokenVerifier
         user = self._connect_user()
-        response, verifier = self._authorize(user.email)
+        response, verifier = self._authorize(user)
         code = response.headers["location"].split("code=")[1].split("&")[0]
         tokens = self.client.post("/mcp/token", data={
             "grant_type": "authorization_code", "client_id": "test-client",
@@ -402,7 +400,7 @@ class TestEndToEndIdentityResolution(_McpOAuthWebTestCase):
         from classpilot.mcp_auth import ClassPilotTokenVerifier
         user = self._connect_user(email="specific.student@school.edu")
 
-        auth_response, verifier = self._authorize(user.email)
+        auth_response, verifier = self._authorize(user)
         code = auth_response.headers["location"].split("code=")[1].split("&")[0]
         tokens = self.client.post("/mcp/token", data={
             "grant_type": "authorization_code", "client_id": "test-client",
@@ -420,14 +418,14 @@ class TestEndToEndIdentityResolution(_McpOAuthWebTestCase):
         user_a = self._connect_user(email="alice@school.edu", refresh_token="1//token-A")
         user_b = self._connect_user(email="bob@school.edu", refresh_token="1//token-B")
 
-        resp_a, verifier_a = self._authorize(user_a.email, client_id="client-a")
+        resp_a, verifier_a = self._authorize(user_a, client_id="client-a")
         code_a = resp_a.headers["location"].split("code=")[1].split("&")[0]
         tokens_a = self.client.post("/mcp/token", data={
             "grant_type": "authorization_code", "client_id": "client-a",
             "code": code_a, "code_verifier": verifier_a,
         }).json()
 
-        resp_b, verifier_b = self._authorize(user_b.email, client_id="client-b")
+        resp_b, verifier_b = self._authorize(user_b, client_id="client-b")
         code_b = resp_b.headers["location"].split("code=")[1].split("&")[0]
         tokens_b = self.client.post("/mcp/token", data={
             "grant_type": "authorization_code", "client_id": "client-b",

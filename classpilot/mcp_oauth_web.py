@@ -126,11 +126,10 @@ async def mcp_authorize(request: Request):
     """
     Authorization endpoint. Requires PKCE (S256).
 
-    Identifies the end user via `login_hint` (the Google email they
-    connected to ClassPilot) — in this phase, the user must already have
-    connected Google (see module docstring). A production deployment
-    would replace this with a real logged-in session; that is called out
-    as a known limitation rather than silently pretended-away.
+    Instead of trusting an arbitrary login_hint, this initiates a secure
+    Google OAuth flow and bridges the MCP request context via the state
+    token. When Google redirects back to ClassPilot's callback, ClassPilot
+    identifies the user and automatically issues the MCP auth code.
     """
     params = request.query_params
     client_id = params.get("client_id")
@@ -139,7 +138,6 @@ async def mcp_authorize(request: Request):
     method = params.get("code_challenge_method", "")
     state = params.get("state")
     resource = params.get("resource")
-    login_hint = params.get("login_hint")
 
     if not client_id or not redirect_uri:
         return _json_error("invalid_request", "client_id and redirect_uri are required.")
@@ -148,51 +146,25 @@ async def mcp_authorize(request: Request):
             "invalid_request",
             "PKCE is required: supply code_challenge with code_challenge_method=S256.",
         )
-    if not login_hint:
-        return _json_error(
-            "invalid_request",
-            "login_hint (the Google email you connected to ClassPilot) is required "
-            "in this phase so the server can identify which connected account to "
-            "authorize. See the Phase 4 limitations in the README.",
-        )
 
-    store = UserStore()
-    user = None
-    with get_connection() as conn:
-        row = conn.execute("SELECT id FROM users WHERE email = %s", (login_hint,)).fetchone()
-        if row:
-            user = str(row[0])
-    if user is None:
-        return _json_error(
-            "access_denied",
-            "That account has not connected Google to ClassPilot yet. Visit "
-            "/auth/google/login first, then retry.",
-            status=403,
-        )
-    if store.get_google_credentials(user) is None:
-        return _json_error(
-            "access_denied",
-            "That account has no stored Google credentials. Reconnect via "
-            "/auth/google/login, then retry.",
-            status=403,
-        )
+    from .oauth_state import generate_state, register_state
+    from .google_oauth import build_authorization_url
 
-    code = secrets.token_urlsafe(32)
-    with get_connection() as conn:
-        conn.execute(
-            "INSERT INTO mcp_auth_codes "
-            "(code, user_id, client_id, redirect_uri, code_challenge, "
-            " code_challenge_method, scopes, resource) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (code, user, client_id, redirect_uri, code_challenge, method,
-             list(DEFAULT_MCP_SCOPES), resource),
-        )
-
-    sep = "&" if "?" in redirect_uri else "?"
-    location = f"{redirect_uri}{sep}code={code}"
-    if state:
-        location += f"&state={state}"
-    return RedirectResponse(location, status_code=302)
+    state_token = generate_state()
+    auth_url, code_verifier = build_authorization_url(state_token)
+    
+    register_state(
+        state_token,
+        code_verifier,
+        mcp_client_id=client_id,
+        mcp_redirect_uri=redirect_uri,
+        mcp_code_challenge=code_challenge,
+        mcp_code_challenge_method=method,
+        mcp_state=state,
+        mcp_resource=resource,
+    )
+    
+    return RedirectResponse(auth_url, status_code=302)
 
 
 async def mcp_token(request: Request) -> JSONResponse:
