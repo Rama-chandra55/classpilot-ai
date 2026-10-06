@@ -14,14 +14,18 @@ RUN pip install --no-cache-dir --upgrade pip
 COPY pyproject.toml README.md /app/
 RUN pip install --no-cache-dir .
 
-# Copy the rest of the application
+# Copy the application code and vendored dependencies
 COPY classpilot /app/classpilot
+COPY vendor_classroom_suite_mcp /app/vendor_classroom_suite_mcp
 
 # Change ownership to the non-root user
 RUN chown -R classpilot:classpilot /app
 
 # Switch to non-root user
 USER classpilot
+
+# Set PYTHONPATH so the vendored package is importable natively
+ENV PYTHONPATH="/app/vendor_classroom_suite_mcp/src"
 
 # Expose the default Cloud Run port
 EXPOSE 8080
