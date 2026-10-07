@@ -29,10 +29,8 @@ dependencies = [
     "starlette>=0.37.0",       # already a transitive dep via fastmcp/mcp; declared
                                # directly now that oauth_web.py imports it itself
     "uvicorn>=0.30.0",         # ASGI server to run oauth_web.py standalone
+    "anthropic>=0.40.0",       # Default LLM provider
 ]
-
-[project.optional-dependencies]
-anthropic = ["anthropic>=0.40.0"]   # only needed if LLM_PROVIDER=anthropic (paid)
 
 [project.scripts]
 classpilot-ai     = "classpilot.main:main"
