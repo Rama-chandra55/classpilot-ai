@@ -222,7 +222,8 @@ class TestAnthropicProvider(unittest.TestCase):
     def test_temperature_is_1(self):
         p, c = self._provider()
         p.generate_message(EventType.NEW_ASSIGNMENT, "DBMS")
-        self.assertEqual(c.messages.create.call_args[1]["temperature"], 1.0)
+        # temperature is omitted since SDK 1.11.0
+        self.assertNotIn("temperature", c.messages.create.call_args[1])
 
 
 class TestNotificationService(unittest.TestCase):

@@ -83,7 +83,6 @@ class AnthropicProvider(LLMProvider):
             response = self._client.messages.create(
                 model=self._model,
                 max_tokens=60,
-                temperature=1.0,
                 system=SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_prompt}],
             )
