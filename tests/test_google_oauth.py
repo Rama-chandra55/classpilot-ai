@@ -841,6 +841,40 @@ class TestPersistCredentialsPreservesExistingRefreshToken(GoogleOAuthTestCase):
         creds = store.get_google_credentials(user1.id)
         self.assertEqual(creds.refresh_token, "first-real-token")  # preserved, not wiped
 
+    def test_complete_authorization_clears_credentials_cache(self):
+        """Regression test for persistent 403: complete_authorization must
+        clear the cached access token so the NEXT call to
+        get_authorized_credentials picks up the newly persisted scopes
+        rather than continuing to serve the old cached credentials."""
+        store = FakeUserStore()
+        
+        # Populate cache with old credentials
+        first_flow = _mock_flow_with_credentials(refresh_token="first", granted_scopes=["old-scope"])
+        with patch("classpilot.google_oauth.Flow.from_client_secrets_file", return_value=first_flow), \
+             patch("classpilot.google_oauth.google_id_token.verify_oauth2_token",
+                   return_value={"sub": "stable-sub", "email": "a@x.com"}), \
+             patch("classpilot.google_oauth._verify_required_scopes_present"):
+            user1 = complete_authorization("code-1", "verifier-1", store)
+            
+        # Get credentials to populate cache
+        with patch("classpilot.google_oauth.Credentials.refresh"):
+            creds_cached = get_authorized_credentials(user1.id, store)
+            self.assertEqual(creds_cached.scopes, ["old-scope"])
+            
+        # Re-authorize with new scopes
+        second_flow = _mock_flow_with_credentials(refresh_token=None, granted_scopes=["old-scope", "new-scope"])
+        with patch("classpilot.google_oauth.Flow.from_client_secrets_file", return_value=second_flow), \
+             patch("classpilot.google_oauth.google_id_token.verify_oauth2_token",
+                   return_value={"sub": "stable-sub", "email": "a@x.com"}), \
+             patch("classpilot.google_oauth._verify_required_scopes_present"):
+            user2 = complete_authorization("code-2", "verifier-2", store)
+            
+        # Verify the NEXT call to get_authorized_credentials does NOT return the old cached creds
+        with patch("classpilot.google_oauth.Credentials.refresh"):
+            creds_new = get_authorized_credentials(user2.id, store)
+            self.assertEqual(creds_new.scopes, ["old-scope", "new-scope"])
+            self.assertIsNot(creds_new, creds_cached)
+
 
 # ---------- Requirement 1: refresh only when needed, not on every call ----------
 

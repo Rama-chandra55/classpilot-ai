@@ -400,6 +400,7 @@ def complete_authorization(code: str, code_verifier: str, user_store: UserStore)
     _persist_credentials(
         user_store, user.id, identity.refresh_token, identity.scopes, identity.token_expiry,
     )
+    clear_credentials_cache(user.id)
     return user
 
 

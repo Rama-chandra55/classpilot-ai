@@ -236,11 +236,27 @@ def fetch_assignments(credentials, course_id: str, topic_id: Optional[str] = Non
     Pages through the full result set before filtering by topic.
     """
     svc = build("classroom", "v1", credentials=credentials)
-    items = _paginate(
-        svc.courses().courseWork().list,
-        "courseWork",
-        {"courseId": course_id, "pageSize": 100},
-    )
+    try:
+        items = _paginate(
+            svc.courses().courseWork().list,
+            "courseWork",
+            {"courseId": course_id, "pageSize": 100},
+        )
+    except Exception as exc:
+        from googleapiclient.errors import HttpError
+        if isinstance(exc, HttpError) and exc.resp.status == 403:
+            scopes = getattr(credentials, "scopes", None)
+            logger.error(
+                "Diagnostic: Classroom API 403 PERMISSION_DENIED on courses().courseWork().list\n"
+                "CourseID: %s\n"
+                "Google Error Reason: %s\n"
+                "Granted Scopes in Credentials: %s\n"
+                "Note: Verify if the Google identity has explicit teacher/owner membership, "
+                "or if an organization-wide restriction prevents third-party API access.",
+                course_id, exc.reason, scopes
+            )
+        raise
+
     if topic_id:
         items = [i for i in items if i.get("topicId") == topic_id]
     return [_normalise_material(m, "ASSIGNMENT") for m in items]
