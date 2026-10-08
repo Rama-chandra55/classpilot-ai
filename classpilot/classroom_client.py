@@ -14,6 +14,7 @@ Scope curation (vendor auth.py is not modified):
     - classroom.courseworkmaterials  → teacher-posted study materials
     - classroom.announcements        → course announcements
     - classroom.topics.readonly      → modules/topics
+    - classroom.coursework.students.readonly → teacher/owner coursework read
 
   Removed from the vendor default (audited — grep the codebase to confirm
   before ever re-adding one of these):
@@ -22,7 +23,8 @@ Scope curation (vendor auth.py is not modified):
       teacher-level "see every student's submissions" call, not something
       a student-facing app reading its own coursework needs). If a future
       phase re-exposes per-student submission listing, this scope comes
-      back with it — deliberately, not by default.
+      back with it — deliberately, not by default. We specifically require
+      the read-only teacher scope (added above) instead.
     - classroom.rosters.readonly     → zero API calls anywhere in this
       codebase touch a roster endpoint. Entirely unused.
     - documents (Google Docs API)    → study_client.py reads Google Docs
@@ -65,6 +67,7 @@ _STUDY_SCOPES = [
     "https://www.googleapis.com/auth/classroom.courseworkmaterials",
     "https://www.googleapis.com/auth/classroom.announcements",
     "https://www.googleapis.com/auth/classroom.topics.readonly",
+    "https://www.googleapis.com/auth/classroom.coursework.students.readonly",
 ]
 
 _auth_module.SCOPES = [

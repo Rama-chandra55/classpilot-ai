@@ -81,6 +81,7 @@ class TestScopeAuditAgainstRealVendorDefaults(unittest.TestCase):
         "https://www.googleapis.com/auth/classroom.announcements",
         "https://www.googleapis.com/auth/classroom.topics.readonly",
         "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/classroom.coursework.students.readonly",
     }
 
     def test_final_scope_set_is_exactly_the_curated_list(self):
@@ -101,7 +102,7 @@ class TestScopeAuditAgainstRealVendorDefaults(unittest.TestCase):
         self.assertFalse(any("rosters" in s for s in real_auth.SCOPES))
 
     def test_coursework_students_scope_removed(self):
-        self.assertFalse(any("coursework.students" in s for s in real_auth.SCOPES))
+        self.assertNotIn("https://www.googleapis.com/auth/classroom.coursework.students", real_auth.SCOPES)
 
     # ---------- narrowed scope ----------
 
@@ -124,6 +125,9 @@ class TestScopeAuditAgainstRealVendorDefaults(unittest.TestCase):
 
     def test_topics_readonly_added(self):
         self.assertIn("https://www.googleapis.com/auth/classroom.topics.readonly", real_auth.SCOPES)
+
+    def test_coursework_students_readonly_added(self):
+        self.assertIn("https://www.googleapis.com/auth/classroom.coursework.students.readonly", real_auth.SCOPES)
 
 
 if __name__ == "__main__":

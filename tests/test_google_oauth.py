@@ -206,7 +206,7 @@ class TestGetWebFlowScopes(GoogleOAuthTestCase):
         """Reuses the SAME curated list Phase 1 audited — not a duplicated
         copy that could drift and silently regrant a dropped scope."""
         scopes = get_web_flow_scopes()
-        self.assertFalse(any("coursework.students" in s for s in scopes))
+        self.assertNotIn("https://www.googleapis.com/auth/classroom.coursework.students", scopes)
         self.assertFalse(any("documents" in s for s in scopes))
         self.assertFalse(any("rosters" in s for s in scopes))
         self.assertNotIn("https://www.googleapis.com/auth/drive", scopes)
@@ -297,7 +297,7 @@ class TestRequestedScopesMatchCuratedSet(GoogleOAuthTestCase):
         with patch("classpilot.google_oauth.Flow.from_client_secrets_file", return_value=mock_flow) as mock_ctor:
             build_authorization_url("state123")
         requested_scopes = mock_ctor.call_args[1]["scopes"]
-        self.assertFalse(any("coursework.students" in s for s in requested_scopes))
+        self.assertNotIn("https://www.googleapis.com/auth/classroom.coursework.students", requested_scopes)
         self.assertFalse(any("rosters" in s for s in requested_scopes))
         self.assertNotIn("https://www.googleapis.com/auth/drive", requested_scopes)
         self.assertFalse(any("drive.file" in s for s in requested_scopes))
