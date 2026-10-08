@@ -83,6 +83,8 @@ def register_state(
         )
 
 
+_recent_consumptions: set[str] = set()
+
 def consume_state(state: str, ttl_seconds: int = DEFAULT_STATE_TTL_SECONDS) -> tuple[Optional[str], Optional[dict]]:
     """
     Validate and immediately invalidate a state token, returning its
@@ -101,22 +103,39 @@ def consume_state(state: str, ttl_seconds: int = DEFAULT_STATE_TTL_SECONDS) -> t
     rejection, not a retry, and must not attempt a token exchange at all
     (there is no code_verifier to use).
     """
+    import hashlib
     if not state:
+        logger.warning("Diagnostic: Rejected OAuth callback — state token missing from request entirely.")
         return None, None
+        
+    state_hash = hashlib.sha256(state.encode("ascii")).hexdigest()[:8]
+
     with get_connection() as conn:
         row = conn.execute(
             "DELETE FROM oauth_states WHERE state = %s RETURNING created_at, code_verifier, mcp_client_id, mcp_redirect_uri, mcp_code_challenge, mcp_code_challenge_method, mcp_state, mcp_resource",
             (state,),
         ).fetchone()
+
     if row is None:
-        logger.warning("Rejected OAuth callback: state token missing or already used.")
+        if state_hash in _recent_consumptions:
+            logger.warning("Diagnostic: Rejected OAuth callback — state token (hash: %s) was ALREADY CONSUMED by this worker process. This is almost certainly a browser prefetch or double-click.", state_hash)
+        else:
+            logger.warning("Diagnostic: Rejected OAuth callback — state token (hash: %s) missing from database. It was either never registered, purged after expiration, forged, or consumed by a different worker process.", state_hash)
         return None, None
         
     (created_at, code_verifier, mcp_client_id, mcp_redirect_uri, 
      mcp_code_challenge, mcp_code_challenge_method, mcp_state, mcp_resource) = row
      
-    if datetime.now(timezone.utc) - created_at > timedelta(seconds=ttl_seconds):
-        logger.warning("Rejected OAuth callback: state token expired.")
+    now_utc = datetime.now(timezone.utc)
+    delta = now_utc - created_at
+    
+    # Register this state as consumed to catch immediate subsequent double-clicks/prefetches
+    _recent_consumptions.add(state_hash)
+    if len(_recent_consumptions) > 10000:
+        _recent_consumptions.clear()
+
+    if delta > timedelta(seconds=ttl_seconds):
+        logger.warning("Diagnostic: Rejected OAuth callback — state token (hash: %s) expired. created_at=%s, now=%s, delta_seconds=%s, ttl=%s", state_hash, created_at, now_utc, delta.total_seconds(), ttl_seconds)
         return None, None
         
     mcp_context = None
