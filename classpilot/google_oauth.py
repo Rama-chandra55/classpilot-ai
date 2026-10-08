@@ -245,7 +245,19 @@ def exchange_code_for_user(code: str, code_verifier: str) -> ExchangedIdentity:
     # returned (may legitimately be a superset; see module docstring).
     # Verifying required scopes against the wrong one would make this check
     # a no-op (it would just compare our request to itself).
-    granted_scopes = list(credentials.granted_scopes or [])
+    raw_granted = credentials.granted_scopes
+    if isinstance(raw_granted, str):
+        # The OAuth 2.0 token response specifies `scope` as a space-delimited string
+        granted_scopes = raw_granted.split()
+    else:
+        granted_scopes = list(raw_granted or [])
+        
+    logger.info(
+        "Diagnostic: OAuth token exchange complete. "
+        "Requested scopes: %s | Actually granted scopes (from token response): %s",
+        flow.oauth2session.scope, granted_scopes
+    )
+        
     _verify_required_scopes_present(granted_scopes)
 
     if not credentials.id_token:

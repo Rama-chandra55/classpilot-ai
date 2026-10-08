@@ -386,6 +386,23 @@ class TestExchangeCodeForUser(GoogleOAuthTestCase):
             identity = exchange_code_for_user("code", "verifier")
         self.assertIsNone(identity.refresh_token)
 
+    def test_granted_scopes_string_parsed_correctly(self):
+        """Regression test: Google's OAuth 2.0 token response specifies 'scope'
+        as a space-delimited string, and google-auth-oauthlib passes it as
+        a raw string to credentials.granted_scopes. If we process it with
+        list(), it turns into a list of characters, causing validation failure.
+        This test proves we split it correctly."""
+        scopes = get_web_flow_scopes()
+        space_delimited = " ".join(scopes)
+        # Pass the raw string, not a list
+        flow = _mock_flow_with_credentials(granted_scopes=space_delimited)
+        claims = {"sub": "sub-1"}
+        with patch("classpilot.google_oauth.Flow.from_client_secrets_file", return_value=flow), \
+             patch("classpilot.google_oauth.google_id_token.verify_oauth2_token", return_value=claims):
+            identity = exchange_code_for_user("code", "verifier")
+            
+        self.assertEqual(identity.scopes, scopes)
+
 
 # ---------- Regression: the actual "Missing code verifier" bug ----------
 
