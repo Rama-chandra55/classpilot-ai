@@ -530,8 +530,9 @@ def _fake_token_response(scope_list, include_id_token=True):
         "refresh_token": "fake-refresh-token",
         "expires_in": 3600,
         "token_type": "Bearer",
-        "scope": " ".join(scope_list),
     }
+    if scope_list is not None:
+        body["scope"] = scope_list if isinstance(scope_list, str) else " ".join(scope_list)
     if include_id_token:
         body["id_token"] = "fake.id.token"
     resp._content = _json.dumps(body).encode()
@@ -739,6 +740,24 @@ class TestGrantedScopeSupersetHandling(GoogleOAuthTestCase):
         curated_after = set(get_web_flow_scopes())
         self.assertEqual(curated_before, curated_after)
         self.assertFalse(set(_HISTORICAL_EXTRA_SCOPES) & curated_after)
+
+    def test_google_omits_scope_entirely_succeeds_by_fallback(self):
+        """RFC 6749 Section 5.1: If the granted scope is identical to what
+        was requested, Google omits the scope field from the JSON response entirely.
+        This must fallback to the requested scopes and succeed, not fail."""
+        # scope_list=None causes _fake_token_response to omit the scope key.
+        identity = self._run_exchange(None)
+        curated = get_web_flow_scopes()
+        self.assertEqual(identity.sub, "sub-1")
+        self.assertEqual(set(identity.scopes), set(curated))
+
+    def test_google_returns_explicitly_empty_scope_string_fails(self):
+        """If Google explicitly says NO scopes were granted (an empty string),
+        this is not an omission, it is a failure to grant."""
+        with self.assertRaises(GoogleOAuthError) as ctx:
+            self._run_exchange("")
+        for scope in get_web_flow_scopes():
+            self.assertIn(scope, str(ctx.exception))
 
     def test_without_the_fix_the_real_library_would_raise_on_superset(self):
         """Sanity check that this test suite would actually catch a

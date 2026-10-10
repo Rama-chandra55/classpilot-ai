@@ -249,8 +249,12 @@ def exchange_code_for_user(code: str, code_verifier: str) -> ExchangedIdentity:
     if isinstance(raw_granted, str):
         # The OAuth 2.0 token response specifies `scope` as a space-delimited string
         granted_scopes = raw_granted.split()
+    elif raw_granted is None:
+        # RFC 6749 Section 5.1: If identical to the requested scope, the response omits it.
+        # google-auth surfaces this omission as None.
+        granted_scopes = list(flow.oauth2session.scope or [])
     else:
-        granted_scopes = list(raw_granted or [])
+        granted_scopes = list(raw_granted)
         
     logger.info(
         "Diagnostic: OAuth token exchange complete. "
