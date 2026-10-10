@@ -205,5 +205,60 @@ class TestPurgeExpiredStates(_PostgresTestCase):
         self.assertEqual(consume_state(state), ("verifier", None))  # still there
 
 
+class TestDatabaseConnectionResilience(_PostgresTestCase):
+    def test_register_state_retries_on_transient_connection_error(self):
+        from classpilot.oauth_state import generate_state, register_state, consume_state
+        import psycopg
+        from unittest.mock import patch
+
+        state = generate_state()
+        
+        # Patch get_connection to fail on the first attempt, succeed on the second
+        real_get_connection = __import__("classpilot.db", fromlist=["get_connection"]).get_connection
+        attempts = [0]
+        
+        def mocked_get_connection():
+            if attempts[0] == 0:
+                attempts[0] += 1
+                raise psycopg.OperationalError("SSL connection has been closed unexpectedly")
+            return real_get_connection()
+            
+        with patch("classpilot.oauth_state.get_connection", side_effect=mocked_get_connection):
+            # This should catch the OperationalError and retry automatically
+            register_state(state, "verifier-retry")
+            
+        self.assertEqual(attempts[0], 1)
+        self.assertEqual(consume_state(state), ("verifier-retry", None))
+
+    def test_rollback_failure_does_not_mask_original_exception(self):
+        """Ensure that if a connection dies midway and rollback fails, the original exception is preserved."""
+        from classpilot.db import get_connection
+        import psycopg
+        from unittest.mock import patch, MagicMock
+
+        # We mock pool.connection() to yield a mock connection where rollback() fails
+        mock_conn = MagicMock()
+        mock_conn.commit.side_effect = Exception("Original error that triggered the rollback")
+        mock_conn.rollback.side_effect = psycopg.OperationalError("the connection is lost")
+
+        # Mock the context manager behavior of pool.connection()
+        class MockPoolConnection:
+            def __enter__(self):
+                return mock_conn
+            def __exit__(self, exc_type, exc_val, exc_tb):
+                pass
+                
+        mock_pool = MagicMock()
+        mock_pool.connection.return_value = MockPoolConnection()
+
+        with patch("classpilot.db.get_pool", return_value=mock_pool):
+            with self.assertRaises(Exception) as ctx:
+                with get_connection() as conn:
+                    raise ValueError("The original application error")
+            
+            # The exception that propagates should be the ValueError, not the psycopg.OperationalError
+            self.assertEqual(str(ctx.exception), "The original application error")
+
+
 if __name__ == "__main__":
     unittest.main()

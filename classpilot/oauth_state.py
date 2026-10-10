@@ -75,12 +75,24 @@ def register_state(
     """
     if not state or not code_verifier:
         raise ValueError("Both state and code_verifier are required and cannot be empty.")
-    with get_connection() as conn:
-        conn.execute(
-            "INSERT INTO oauth_states (state, code_verifier, mcp_client_id, mcp_redirect_uri, mcp_code_challenge, mcp_code_challenge_method, mcp_state, mcp_resource) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (state, code_verifier, mcp_client_id, mcp_redirect_uri, mcp_code_challenge, mcp_code_challenge_method, mcp_state, mcp_resource),
-        )
+    
+    import psycopg
+    # Safe to retry transient connection errors here: it's a single INSERT of a fresh,
+    # randomly generated state token. If it failed before committing, a retry is safe.
+    for attempt in range(2):
+        try:
+            with get_connection() as conn:
+                conn.execute(
+                    "INSERT INTO oauth_states (state, code_verifier, mcp_client_id, mcp_redirect_uri, mcp_code_challenge, mcp_code_challenge_method, mcp_state, mcp_resource) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                    (state, code_verifier, mcp_client_id, mcp_redirect_uri, mcp_code_challenge, mcp_code_challenge_method, mcp_state, mcp_resource),
+                )
+            break
+        except psycopg.OperationalError:
+            if attempt == 0:
+                logger.warning("Transient database connection failure during register_state, retrying...")
+                continue
+            raise
 
 
 _recent_consumptions: set[str] = set()

@@ -157,6 +157,19 @@ CREATE TABLE IF NOT EXISTS watcher_configs (
 _pool: "ConnectionPool | None" = None
 
 
+def _check_connection(conn: psycopg.Connection) -> None:
+    """
+    Perform a lightweight network round-trip to detect silent drops (e.g. Neon
+    terminating idle connections). psycopg_pool's default check often misses
+    half-open TCP connections.
+    """
+    try:
+        conn.execute("SELECT 1")
+        conn.rollback()  # reset transaction state so the caller starts clean
+    except psycopg.OperationalError as e:
+        raise psycopg.OperationalError("Connection is dead") from e
+
+
 def get_pool() -> ConnectionPool:
     """Return the process-wide Postgres connection pool, creating it (but
     not necessarily connecting yet — psycopg_pool connects lazily/in the
@@ -169,7 +182,8 @@ def get_pool() -> ConnectionPool:
             conninfo=dsn,
             min_size=cfg.db_pool_min_size,
             max_size=cfg.db_pool_max_size,
-            open=True
+            open=True,
+            check=_check_connection
         )
         logger.debug("Postgres connection pool created (min=%s, max=%s)", cfg.db_pool_min_size, cfg.db_pool_max_size)
     return _pool
@@ -198,7 +212,12 @@ def get_connection() -> Iterator[psycopg.Connection]:
             yield conn
             conn.commit()
         except Exception:
-            conn.rollback()
+            try:
+                conn.rollback()
+            except psycopg.OperationalError:
+                # If the connection was dropped silently, rollback itself will fail.
+                # Catch it here so the original exception propagates to the caller.
+                pass
             raise
 
 
