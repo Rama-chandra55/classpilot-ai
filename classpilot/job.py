@@ -23,11 +23,61 @@ from classpilot.state_store import StateStore
 logger = logging.getLogger(__name__)
 
 
+import sys
+
+def run_diagnostics(user_id: str, credentials, config) -> None:
+    """Run read-only verifications for all critical integrations."""
+    logger.info("========================================")
+    logger.info("DRY RUN DIAGNOSTICS FOR USER: %s", user_id)
+    logger.info("========================================")
+    
+    # 1. Verify Classroom assignment fetching
+    logger.info("1. Verifying Google Classroom connectivity...")
+    try:
+        from classpilot.classroom_client import classroom
+        client = classroom(credentials)
+        courses = client.courses().list(pageSize=1).execute()
+        logger.info("   [PASS] Successfully fetched %d course(s)", len(courses.get('courses', [])))
+    except Exception as exc:
+        logger.error("   [FAIL] Classroom fetch failed: %s", exc)
+
+    # 2. Verify Groq (LLM) configuration
+    logger.info("2. Verifying LLM (%s) configuration...", config.llm_backend)
+    try:
+        from classpilot.llm import create_llm_provider
+        from classpilot.events import EventType
+        llm = create_llm_provider(config)
+        response = llm.generate_message(EventType.NEW_ASSIGNMENT, "Diagnostic Test Assignment")
+        if not response:
+            raise ValueError("LLM returned empty response")
+        logger.info("   [PASS] Successfully generated text using %s", config.llm_backend)
+    except Exception as exc:
+        logger.error("   [FAIL] LLM verification failed: %s", exc)
+
+    # 3. Verify SMTP configuration
+    logger.info("3. Verifying SMTP configuration...")
+    try:
+        if config.notifier_backend.lower() == "email":
+            import smtplib
+            with smtplib.SMTP(config.smtp_host, config.smtp_port, timeout=15) as server:
+                server.starttls()
+                server.login(config.smtp_user, config.smtp_password)
+            logger.info("   [PASS] Successfully connected and authenticated to SMTP server")
+        else:
+            logger.info("   [SKIP] Notifier backend is '%s', skipping SMTP verification", config.notifier_backend)
+    except Exception as exc:
+        logger.error("   [FAIL] SMTP verification failed: %s", exc)
+
 def main() -> None:
+    is_dry_run = "--dry-run" in sys.argv
     config = get_config()
     configure_logging(config.log_level)
     
-    logger.info("Starting ClassPilot background job execution")
+    if is_dry_run:
+        logger.info("Starting ClassPilot background job in DRY RUN mode")
+    else:
+        logger.info("Starting ClassPilot background job execution")
+        
     state_store = StateStore()
     enabled_users = state_store.get_enabled_watchers()
     
@@ -49,15 +99,20 @@ def main() -> None:
             logger.warning("Could not fetch credentials for user %s: %s", user_id, exc)
             continue
             
-        logger.info("Running poll cycle for user %s", user_id)
-        
-        try:
-            services = build_user_services(user_id, credentials, to_email=user.email)
-            services.run_poll_cycle()
-        except Exception as exc:
-            logger.error("Poll cycle failed for user %s: %s", user_id, exc, exc_info=True)
+        if is_dry_run:
+            run_diagnostics(user_id, credentials, config)
+        else:
+            logger.info("Running poll cycle for user %s", user_id)
+            try:
+                services = build_user_services(user_id, credentials, to_email=user.email)
+                services.run_poll_cycle()
+            except Exception as exc:
+                logger.error("Poll cycle failed for user %s: %s", user_id, exc, exc_info=True)
             
-    logger.info("Background job execution complete")
+    if is_dry_run:
+        logger.info("Dry run diagnostics complete")
+    else:
+        logger.info("Background job execution complete")
 
 
 if __name__ == "__main__":

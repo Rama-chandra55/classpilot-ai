@@ -65,6 +65,50 @@ class TestJobExecution(unittest.TestCase):
         # User B was skipped
         mock_get_creds.assert_called_once_with(self.user_a_id, ANY)  # Not called for B
 
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("classpilot.job.run_diagnostics")
+    @patch("classpilot.job.build_user_services")
+    def test_job_dry_run_flag(self, mock_build, mock_diagnostics, mock_get_creds):
+        self.store.set_watcher_enabled(self.user_a_id, True)
+        mock_get_creds.return_value = MagicMock()
+        
+        with patch.object(sys, "argv", ["job.py", "--dry-run"]):
+            main()
+            
+        mock_diagnostics.assert_called_once()
+        mock_build.assert_not_called()
+
+    @patch("classpilot.job.logger")
+    def test_run_diagnostics_success(self, mock_logger):
+        from classpilot.job import run_diagnostics
+        
+        mock_creds = MagicMock()
+        mock_config = MagicMock()
+        mock_config.llm_backend = "dummy"
+        mock_config.notifier_backend = "email"
+        mock_config.smtp_host = "localhost"
+        mock_config.smtp_port = 25
+        mock_config.smtp_user = "u"
+        mock_config.smtp_password = "p"
+        
+        with patch("classpilot.classroom_client.classroom") as mock_cls, \
+             patch("classpilot.llm.create_llm_provider") as mock_llm_factory, \
+             patch("smtplib.SMTP") as mock_smtp:
+             
+             mock_client = MagicMock()
+             mock_cls.return_value = mock_client
+             mock_client.courses().list().execute.return_value = {"courses": [{"id": "1"}]}
+             
+             mock_llm = MagicMock()
+             mock_llm.generate_message.return_value = "Test response"
+             mock_llm_factory.return_value = mock_llm
+             
+             run_diagnostics("user_1", mock_creds, mock_config)
+             
+        mock_logger.info.assert_any_call("   [PASS] Successfully fetched %d course(s)", 1)
+        mock_logger.info.assert_any_call("   [PASS] Successfully generated text using %s", "dummy")
+        mock_logger.info.assert_any_call("   [PASS] Successfully connected and authenticated to SMTP server")
+
     @patch("classpilot.services.create_llm_provider")
     @patch("classpilot.services.create_notifier")
     @patch("classpilot.job.get_authorized_credentials")
