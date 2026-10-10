@@ -792,6 +792,36 @@ class TestVerifyRequiredScopesPresent(GoogleOAuthTestCase):
         for scope in get_web_flow_scopes():
             self.assertIn(scope, str(ctx.exception))
 
+    def test_broader_historical_scopes_satisfying_readonly_requirements(self):
+        curated = get_web_flow_scopes()
+        # Replace readonly scopes with their broader read/write equivalents
+        granted = [
+            s for s in curated 
+            if s not in (
+                "https://www.googleapis.com/auth/classroom.coursework.students.readonly",
+                "https://www.googleapis.com/auth/drive.readonly"
+            )
+        ]
+        granted.extend([
+            "https://www.googleapis.com/auth/classroom.coursework.students",
+            "https://www.googleapis.com/auth/drive"
+        ])
+        # Must not raise an error because the broader scopes satisfy the requirements
+        _verify_required_scopes_present(granted)
+
+    def test_unrelated_scopes_not_accepted_as_substitutes(self):
+        curated = get_web_flow_scopes()
+        granted = [
+            s for s in curated 
+            if s != "https://www.googleapis.com/auth/classroom.coursework.students.readonly"
+        ]
+        # Append a scope that is related but NOT the accepted superset
+        granted.append("https://www.googleapis.com/auth/classroom.coursework.me")
+        
+        with self.assertRaises(GoogleOAuthError) as ctx:
+            _verify_required_scopes_present(granted)
+        self.assertIn("classroom.coursework.students.readonly", str(ctx.exception))
+
 
 # ---------- Requirement 2: never overwrite a valid refresh token with None ----------
 

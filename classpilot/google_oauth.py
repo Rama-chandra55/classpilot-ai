@@ -343,7 +343,21 @@ def _verify_required_scopes_present(granted_scopes: list[str]) -> None:
     """
     required = set(get_web_flow_scopes())
     granted = set(granted_scopes)
-    missing = required - granted
+    
+    # Map read-only scopes to their historical read/write supersets
+    superset_map = {
+        "https://www.googleapis.com/auth/classroom.coursework.students.readonly": "https://www.googleapis.com/auth/classroom.coursework.students",
+        "https://www.googleapis.com/auth/drive.readonly": "https://www.googleapis.com/auth/drive",
+    }
+    
+    missing = set()
+    for req in required:
+        if req in granted:
+            continue
+        if req in superset_map and superset_map[req] in granted:
+            continue
+        missing.add(req)
+
     if missing:
         raise GoogleOAuthError(
             "Google did not grant all permissions ClassPilot requires. "
