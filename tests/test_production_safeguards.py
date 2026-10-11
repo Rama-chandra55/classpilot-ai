@@ -901,3 +901,186 @@ class TestSimulationZeroSideEffects(unittest.TestCase):
         rec = ro_store.get_known_assignment("c1", "a1", user_id="sim-user")
         self.assertIsNotNone(rec)
         self.assertEqual(rec["status"], "pending")
+
+
+class TestControlledProductionEmailTest(unittest.TestCase):
+    """Test controlled production email test safeguards, claim lifecycle, and deduplication."""
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    def test_controlled_test_fails_closed_when_production_test_user_id_missing(
+        self, mock_user_store_cls, mock_state_store_cls
+    ):
+        from classpilot.job import run_controlled_test
+
+        conf = ClassPilotConfig()
+        conf.production_test_user_id = None
+
+        result = run_controlled_test(conf)
+        self.assertFalse(result)
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    def test_controlled_test_fails_closed_when_user_not_found(
+        self, mock_user_store_cls, mock_state_store_cls
+    ):
+        from classpilot.job import run_controlled_test
+
+        conf = ClassPilotConfig()
+        conf.production_test_user_id = "missing-user"
+
+        mock_user_store = MagicMock()
+        mock_user_store.get_user_by_id.return_value = None
+        mock_user_store_cls.return_value = mock_user_store
+
+        result = run_controlled_test(conf)
+        self.assertFalse(result)
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    def test_controlled_test_fails_closed_when_watcher_disabled(
+        self, mock_user_store_cls, mock_state_store_cls
+    ):
+        from classpilot.job import run_controlled_test
+
+        conf = ClassPilotConfig()
+        conf.production_test_user_id = "disabled-user"
+
+        mock_user_store = MagicMock()
+        mock_user_store.get_user_by_id.return_value = MagicMock(email="test@example.com")
+        mock_user_store_cls.return_value = mock_user_store
+
+        mock_state = MagicMock()
+        mock_state.get_enabled_watchers.return_value = ["some-other-user"]
+        mock_state_store_cls.return_value = mock_state
+
+        result = run_controlled_test(conf)
+        self.assertFalse(result)
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.get_authorized_credentials")
+    def test_controlled_test_fails_closed_when_credentials_invalid(
+        self, mock_get_creds, mock_user_store_cls, mock_state_store_cls
+    ):
+        from classpilot.job import run_controlled_test
+
+        conf = ClassPilotConfig()
+        conf.production_test_user_id = "unauth-user"
+
+        mock_user_store = MagicMock()
+        mock_user_store.get_user_by_id.return_value = MagicMock(email="test@example.com")
+        mock_user_store_cls.return_value = mock_user_store
+
+        mock_state = MagicMock()
+        mock_state.get_enabled_watchers.return_value = ["unauth-user"]
+        mock_state_store_cls.return_value = mock_state
+
+        mock_get_creds.side_effect = RuntimeError("Invalid OAuth token")
+
+        result = run_controlled_test(conf)
+        self.assertFalse(result)
+
+    @patch("classpilot.job.create_notifier")
+    @patch("classpilot.job.create_llm_provider")
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.StateStore")
+    def test_controlled_test_success_claim_lifecycle_and_duplicate_suppression(
+        self, mock_state_cls, mock_user_cls, mock_get_creds, mock_create_llm, mock_create_notifier
+    ):
+        from classpilot.job import run_controlled_test
+
+        conf = ClassPilotConfig()
+        conf.production_test_user_id = "auth-user"
+
+        mock_user = MagicMock(email="auth-student@college.edu")
+        mock_user_store = MagicMock()
+        mock_user_store.get_user_by_id.return_value = mock_user
+        mock_user_cls.return_value = mock_user_store
+
+        mock_get_creds.return_value = MagicMock()
+
+        # StateStore behavior simulation:
+        # 1. get_known_assignment -> None
+        # 2. claim_new_assignment -> True (sets pending)
+        # 3. get_known_assignment -> {"status": "pending"}
+        # 4. mark_assignment_sent -> sets sent
+        # 5. get_known_assignment -> {"status": "sent"}
+        # 6. duplicate claim_new_assignment -> False
+        records = {}
+
+        mock_state = MagicMock()
+        mock_state.get_enabled_watchers.return_value = ["auth-user"]
+
+        def mock_get(course_id, assignment_id, user_id=None):
+            return records.get((user_id, course_id, assignment_id))
+
+        def mock_claim(course_id, assignment_id, title, due_date, due_time, user_id=None):
+            key = (user_id, course_id, assignment_id)
+            if key in records and records[key].get("status") == "sent":
+                return False
+            records[key] = {"status": "pending"}
+            return True
+
+        def mock_mark_sent(course_id, assignment_id, user_id=None):
+            key = (user_id, course_id, assignment_id)
+            records[key] = {"status": "sent"}
+            return True
+
+        mock_state.get_known_assignment.side_effect = mock_get
+        mock_state.claim_new_assignment.side_effect = mock_claim
+        mock_state.mark_assignment_sent.side_effect = mock_mark_sent
+        mock_state_cls.return_value = mock_state
+
+        mock_llm = MagicMock()
+        mock_llm.generate_message.return_value = "Test assignment AI notification"
+        mock_create_llm.return_value = mock_llm
+
+        mock_notifier = MagicMock()
+        mock_create_notifier.return_value = mock_notifier
+
+        result = run_controlled_test(conf, event_id="controlled-evt-123")
+        self.assertTrue(result)
+
+        # Verified recipient is strictly auth-student@college.edu
+        mock_create_notifier.assert_called_once_with(conf, to_email_override="auth-student@college.edu")
+        mock_notifier.send.assert_called_once()
+
+        # Database claim transitions verified
+        self.assertEqual(records[("auth-user", "controlled-test-verification", "controlled-evt-123")]["status"], "sent")
+
+        # Second claim attempt occurred and was rejected
+        self.assertEqual(mock_state.claim_new_assignment.call_count, 2)
+
+    @patch("classpilot.job.create_notifier")
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.StateStore")
+    def test_controlled_test_rerun_existing_sent_event_suppresses_duplicate(
+        self, mock_state_cls, mock_user_cls, mock_get_creds, mock_create_notifier
+    ):
+        from classpilot.job import run_controlled_test
+
+        conf = ClassPilotConfig()
+        conf.production_test_user_id = "auth-user"
+
+        mock_user = MagicMock(email="auth-student@college.edu")
+        mock_user_store = MagicMock()
+        mock_user_store.get_user_by_id.return_value = mock_user
+        mock_user_cls.return_value = mock_user_store
+
+        mock_get_creds.return_value = MagicMock()
+
+        mock_state = MagicMock()
+        mock_state.get_enabled_watchers.return_value = ["auth-user"]
+        # Already sent in PostgreSQL
+        mock_state.get_known_assignment.return_value = {"status": "sent"}
+        mock_state.claim_new_assignment.return_value = False
+        mock_state_cls.return_value = mock_state
+
+        result = run_controlled_test(conf, event_id="controlled-evt-123")
+        self.assertTrue(result)
+
+        # Zero emails sent on re-run of already sent event
+        mock_create_notifier.assert_not_called()

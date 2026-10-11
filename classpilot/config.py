@@ -150,7 +150,11 @@ class ClassPilotConfig:
         default_factory=lambda: int(os.getenv("MAX_NOTIFICATIONS_PER_RUN", "5"))
     )
     production_test_user_id: Optional[str] = field(
-        default_factory=lambda: (os.getenv("PRODUCTION_TEST_USER_ID", "").strip() or None)
+        default_factory=lambda: (
+            os.getenv("PRODUCTION_TEST_USER_ID", "").strip()
+            or os.getenv("TEST_USER_ID", "").strip()
+            or None
+        )
     )
 
     # --- HTTP MCP transport (Streamable HTTP for remote clients) ---

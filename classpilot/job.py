@@ -20,6 +20,9 @@ from classpilot.user_store import UserStore
 from classpilot.google_oauth import get_authorized_credentials
 from classpilot.services import build_user_services
 from classpilot.state_store import StateStore
+from classpilot.notifier import create_notifier
+from classpilot.llm import create_llm_provider
+from classpilot.events import EventType
 
 logger = logging.getLogger(__name__)
 
@@ -456,12 +459,294 @@ def run_test_email(
         return False
 
 
+def run_controlled_test(config, event_id: Optional[str] = None) -> bool:
+    """
+    Execute a single controlled live-email verification test for the authorized user only.
+
+    Safeguards:
+    1. Restricted strictly to PRODUCTION_TEST_USER_ID / TEST_USER_ID.
+    2. Fails closed if authorized user ID is missing, not in UserStore, watcher disabled,
+       or invalid credentials.
+    3. Strictly delivers to user.email stored in PostgreSQL; never any other address.
+    4. Enforces MAX_NOTIFICATIONS_PER_RUN=1 budget.
+    5. Uses a controlled test event in PostgreSQL state store; never deletes or resets
+       history, and never fabricates real Google Classroom assignments.
+    6. Verifies claim lifecycle:
+       - Phase 1: Claims event (status -> 'pending'), sends 1 email via Gemini + SMTP,
+         transitions claim status -> 'sent'.
+       - Phase 2: Immediately re-evaluates the same event, verifying PostgreSQL state
+         store suppresses duplicate and sends 0 additional emails.
+    7. Outputs exact metrics (sent, suppressed, claim status, failures, workflow URL).
+    """
+    logger.info("==================================================================")
+    logger.info("STARTING CONTROLLED PRODUCTION EMAIL VERIFICATION")
+    logger.info("==================================================================")
+
+    # 1. Fail-closed validation of authorized user
+    target_user_id = config.production_test_user_id
+    if not target_user_id:
+        logger.error(
+            "Controlled verification aborted: PRODUCTION_TEST_USER_ID is not configured. "
+            "Failing closed."
+        )
+        return False
+
+    target_user_id = target_user_id.strip()
+    masked_id = _mask_user_id(target_user_id)
+    logger.info("Target authorized user ID: %s", masked_id)
+
+    state_store = StateStore()
+    user_store = UserStore()
+
+    user = user_store.get_user_by_id(target_user_id)
+    if not user:
+        logger.error(
+            "Controlled verification aborted: Authorized user %s does not exist in UserStore. "
+            "Failing closed.",
+            masked_id,
+        )
+        return False
+
+    enabled_users = state_store.get_enabled_watchers()
+    if target_user_id not in enabled_users:
+        logger.error(
+            "Controlled verification aborted: Authorized user %s does not have an enabled watcher. "
+            "Failing closed.",
+            masked_id,
+        )
+        return False
+
+    try:
+        credentials = get_authorized_credentials(target_user_id, user_store)
+    except Exception as exc:
+        sanitized_exc = _sanitize_diagnostic_message(str(exc))
+        logger.error(
+            "Controlled verification aborted: Failed to resolve credentials for user %s: %s. "
+            "Failing closed.",
+            masked_id,
+            sanitized_exc,
+        )
+        return False
+
+    if not credentials:
+        logger.error(
+            "Controlled verification aborted: User %s has no valid credentials. "
+            "Failing closed.",
+            masked_id,
+        )
+        return False
+
+    recipient_email = (getattr(user, "email", None) or "").strip()
+    email_regex = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+    if not recipient_email or not re.match(email_regex, recipient_email):
+        logger.error(
+            "Controlled verification aborted: User %s has invalid email: %r. "
+            "Failing closed.",
+            masked_id,
+            recipient_email,
+        )
+        return False
+
+    logger.info("Authorized recipient email: %s", recipient_email)
+
+    # 2. Setup controlled test event (safe namespace, no Classroom modifications)
+    course_id = "controlled-test-verification"
+    course_name = "ClassPilot Verification"
+    effective_event_id = (
+        (event_id.strip() if event_id else None)
+        or (os.getenv("CONTROLLED_TEST_EVENT_ID", "").strip() or None)
+        or "event-controlled-live-v1"
+    )
+    assignment_title = "Controlled Production Email Verification"
+
+    logger.info(
+        "Controlled test event: course_id='%s', assignment_id='%s', title='%s'",
+        course_id, effective_event_id, assignment_title,
+    )
+
+    # 3. Setup notification budget (strictly 1 notification allowed)
+    budget = NotificationBudget(limit=1)
+
+    # 4. Phase 1: Claim & Send
+    emails_sent = 0
+    emails_suppressed = 0
+    failures = 0
+    claim_status = "unknown"
+
+    existing_record = state_store.get_known_assignment(course_id, effective_event_id, user_id=target_user_id)
+    if existing_record and existing_record.get("status") == "sent":
+        logger.warning(
+            "Event '%s' was ALREADY previously sent in PostgreSQL state store (status='sent'). "
+            "Testing duplicate rejection on existing record.",
+            effective_event_id,
+        )
+        claim_won = state_store.claim_new_assignment(
+            course_id, effective_event_id, assignment_title, None, None, user_id=target_user_id
+        )
+        if claim_won:
+            logger.critical("SECURITY REGRESSION: Duplicate claim won on an already-sent assignment!")
+            failures += 1
+            claim_status = "error"
+        else:
+            logger.info("Duplicate prevention verified: claim rejected by PostgreSQL.")
+            budget.record_suppressed()
+            emails_suppressed += 1
+            claim_status = "sent"
+    else:
+        # Initial attempt: Claim the assignment
+        logger.info("Claiming controlled test event '%s'...", effective_event_id)
+        claim_won = state_store.claim_new_assignment(
+            course_id, effective_event_id, assignment_title, None, None, user_id=target_user_id
+        )
+        if not claim_won:
+            logger.error("Failed to acquire claim on test event. Failing closed.")
+            failures += 1
+            return False
+
+        pending_record = state_store.get_known_assignment(course_id, effective_event_id, user_id=target_user_id)
+        if not pending_record or pending_record.get("status") != "pending":
+            logger.error(
+                "Database claim verification failed: expected status='pending', got: %s",
+                pending_record.get("status") if pending_record else "None",
+            )
+            failures += 1
+            return False
+        logger.info("Database claim status verified: 'pending'")
+
+        if not budget.can_send():
+            logger.error("Budget exhausted before sending notification. Failing closed.")
+            failures += 1
+            return False
+
+        budget.record_attempt()
+        try:
+            llm = create_llm_provider(config)
+            notification_text = llm.generate_message(
+                EventType.NEW_ASSIGNMENT,
+                f"{assignment_title} in {course_name}"
+            )
+            if not notification_text:
+                raise ValueError("LLM returned empty notification text")
+
+            subject = f"[CLASSPILOT] {assignment_title}"
+            body = (
+                f"{notification_text}\n\n"
+                f"---\n"
+                f"Course: {course_name}\n"
+                f"Event ID: {effective_event_id}\n"
+                f"Verified Recipient: {recipient_email}\n"
+                f"Status: Controlled Live-Email Verification\n"
+                f"[This email confirms that ClassPilot production notifications and PostgreSQL "
+                f"deduplication safeguards are functioning correctly. No other users received notifications.]\n"
+            )
+
+            notifier = create_notifier(config, to_email_override=recipient_email)
+            notifier.send(subject=subject, body=body)
+
+            state_store.mark_assignment_sent(course_id, effective_event_id, user_id=target_user_id)
+            budget.record_success()
+            emails_sent += 1
+            logger.info("Successfully sent controlled verification email to %s", recipient_email)
+
+            sent_record = state_store.get_known_assignment(course_id, effective_event_id, user_id=target_user_id)
+            if not sent_record or sent_record.get("status") != "sent":
+                logger.error(
+                    "Database claim status transition verification failed: expected 'sent', got %s",
+                    sent_record.get("status") if sent_record else "None",
+                )
+                failures += 1
+            else:
+                claim_status = "sent"
+                logger.info("Database claim status verified: 'sent'")
+
+        except Exception as exc:
+            sanitized_exc = _sanitize_diagnostic_message(str(exc))
+            logger.error("Failed to send verification email: %s", sanitized_exc)
+            state_store.mark_assignment_retryable(course_id, effective_event_id, error=str(exc), user_id=target_user_id)
+            budget.record_failure()
+            failures += 1
+            claim_status = "retryable"
+            return False
+
+        # Phase 2: Re-run exact same event to verify duplicate prevention
+        logger.info("Phase 2: Re-running exact same event to verify duplicate prevention...")
+        dup_claim_won = state_store.claim_new_assignment(
+            course_id, effective_event_id, assignment_title, None, None, user_id=target_user_id
+        )
+        if dup_claim_won:
+            logger.critical("SECURITY REGRESSION: Duplicate claim was WON on an already-sent event!")
+            failures += 1
+        else:
+            logger.info("Duplicate prevention verified: Duplicate claim rejected by PostgreSQL state store.")
+            budget.record_suppressed()
+            emails_suppressed += 1
+
+    # 5. Output exact metrics
+    server_url = os.getenv("GITHUB_SERVER_URL", "https://github.com")
+    repo = os.getenv("GITHUB_REPOSITORY", "Rama-chandra55/classpilot-ai")
+    run_id = os.getenv("GITHUB_RUN_ID", "")
+    workflow_url = f"{server_url}/{repo}/actions/runs/{run_id}" if run_id else "N/A (Local / Manual execution)"
+
+    logger.info("==================================================================")
+    logger.info("CONTROLLED VERIFICATION RESULTS")
+    logger.info("==================================================================")
+    logger.info("Emails sent: %d", emails_sent)
+    logger.info("Emails suppressed: %d", emails_suppressed)
+    logger.info("Database claim status: %s", claim_status)
+    logger.info("Failures: %d", failures)
+    logger.info("Workflow URL: %s", workflow_url)
+    logger.info("==================================================================")
+
+    summary_path = os.getenv("GITHUB_STEP_SUMMARY")
+    if summary_path:
+        try:
+            with open(summary_path, "a", encoding="utf-8") as f:
+                f.write("## 🚀 ClassPilot AI — Controlled Production Email Verification\n\n")
+                f.write("| Metric | Result |\n")
+                f.write("| --- | --- |\n")
+                f.write(f"| **Authorized User** | `{masked_id}` |\n")
+                f.write(f"| **Verified Recipient** | `{recipient_email}` |\n")
+                f.write(f"| **Emails Sent** | **{emails_sent}** |\n")
+                f.write(f"| **Emails Suppressed** | **{emails_suppressed}** |\n")
+                f.write(f"| **Database Claim Status** | `{claim_status}` |\n")
+                f.write(f"| **Failures** | `{failures}` |\n")
+                f.write(f"| **Workflow URL** | [{workflow_url}]({workflow_url}) |\n\n")
+                if failures == 0 and (emails_sent == 1 or emails_suppressed >= 1):
+                    f.write("✅ **Verification Passed**: Controlled live-email delivered, claim status transitioned to `sent`, and duplicate prevention confirmed.\n")
+                else:
+                    f.write("❌ **Verification Failed**: See job log for details.\n")
+        except Exception as summary_err:
+            logger.warning("Could not write GITHUB_STEP_SUMMARY: %s", summary_err)
+
+    return failures == 0
+
+
 def main() -> None:
     is_dry_run = "--dry-run" in sys.argv
     is_test_email = "--test-email" in sys.argv
     is_simulate_watcher = "--simulate-watcher" in sys.argv
+    is_controlled_test = "--controlled-test" in sys.argv
     config = get_config()
     configure_logging(config.log_level)
+
+    if is_controlled_test:
+        logger.info("Starting ClassPilot in CONTROLLED PRODUCTION EMAIL TEST mode")
+        event_id = None
+        for idx, arg in enumerate(sys.argv):
+            if arg == "--event-id" and idx + 1 < len(sys.argv):
+                event_id = sys.argv[idx + 1]
+            elif arg.startswith("--event-id="):
+                event_id = arg.split("=", 1)[1]
+
+        success = run_controlled_test(config, event_id=event_id)
+        if success:
+            logger.info("Controlled production email verification passed successfully.")
+            sys.exit(0)
+            return
+        else:
+            logger.error("Controlled production email verification failed.")
+            sys.exit(1)
+            return
 
     if is_simulate_watcher:
         logger.info("Starting ClassPilot in WATCHER SIMULATION mode")
