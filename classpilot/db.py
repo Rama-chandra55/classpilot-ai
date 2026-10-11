@@ -214,7 +214,7 @@ def close_pool() -> None:
 
 
 @contextmanager
-def get_connection() -> Iterator[psycopg.Connection]:
+def get_connection(timeout: Optional[float] = None) -> Iterator[psycopg.Connection]:
     """
     Borrow a connection from the pool for a single unit of work.
 
@@ -223,7 +223,7 @@ def get_connection() -> Iterator[psycopg.Connection]:
     consistent here deliberately.
     """
     pool = get_pool()
-    with pool.connection() as conn:
+    with pool.connection(timeout=timeout) as conn:
         try:
             yield conn
             conn.commit()

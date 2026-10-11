@@ -381,8 +381,9 @@ class TestUnifiedRouting(unittest.TestCase):
         r = client.get("/health")
         self.assertEqual(r.status_code, 200)
         
-        r = client.get("/ready")
-        self.assertIn(r.status_code, (200, 503))
+        with patch("classpilot.http_server.get_connection"):
+            r = client.get("/ready")
+            self.assertIn(r.status_code, (200, 503))
 
         # OAuth endpoints
         r = client.get("/.well-known/oauth-authorization-server")

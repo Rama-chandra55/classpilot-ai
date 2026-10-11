@@ -47,7 +47,7 @@ async def health_check(request) -> "JSONResponse":
 async def readiness_check(request) -> "JSONResponse":
     from starlette.responses import JSONResponse
     try:
-        with get_connection() as conn:
+        with get_connection(timeout=2.0) as conn:
             conn.execute("SELECT 1")
         return JSONResponse({"status": "ready"})
     except Exception as exc:
