@@ -23,6 +23,7 @@ from classpilot.state_store import StateStore
 logger = logging.getLogger(__name__)
 
 
+import os
 import re
 import sys
 from typing import Optional
@@ -34,6 +35,16 @@ def _sanitize_diagnostic_message(msg: str) -> str:
     msg = re.sub(r'AIza[0-9A-Za-z-_]{35}', '[REDACTED_API_KEY]', msg)
     msg = re.sub(r'Bearer\s+[A-Za-z0-9._~+/-]+', 'Bearer [REDACTED]', msg)
     return msg
+
+
+def _mask_user_id(user_id: Optional[str]) -> str:
+    """Mask user ID to prevent exposing sensitive identifiers in logs."""
+    if not user_id:
+        return "<unset>"
+    clean = str(user_id).strip()
+    if len(clean) <= 4:
+        return "***"
+    return f"***{clean[-4:]}"
 
 
 def run_diagnostics(user_id: str, credentials, config) -> None:
@@ -221,27 +232,51 @@ def run_test_email(
         logger.error("Test email aborted: '%s' is not a valid email address.", sanitized_email)
         return False
 
-    # 2. Select authorized college account
+    # 2. Select authorized college account deterministically
     state_store = StateStore()
     user_store = UserStore()
 
-    target_user_id = user_id
-    if not target_user_id:
-        enabled_users = state_store.get_enabled_watchers()
-        if enabled_users:
-            target_user_id = enabled_users[0]
-        else:
-            logger.error("Test email aborted: No enabled college account found in database.")
-            return False
+    target_user_id = (user_id.strip() if user_id else None) or (os.getenv("TEST_USER_ID", "").strip() or None)
+    enabled_users = state_store.get_enabled_watchers()
 
-    masked_id = f"***{target_user_id[-4:]}" if len(target_user_id) >= 4 else "***"
-    logger.info("Selected authorized college account (%s) for Classroom coursework test.", masked_id)
+    if target_user_id:
+        masked_id = _mask_user_id(target_user_id)
+        if target_user_id not in enabled_users:
+            logger.error(
+                "Test email aborted: Configured account (%s) is not an enabled watcher. Failing closed.",
+                masked_id
+            )
+            return False
+        logger.info("Using configured account (%s) for test email.", masked_id)
+    else:
+        if not enabled_users:
+            logger.error("Test email aborted: No enabled accounts found in database. Failing closed.")
+            return False
+        if len(enabled_users) > 1:
+            logger.error(
+                "Test email aborted: Multiple enabled accounts found (%d). "
+                "Account cannot be identified unambiguously without TEST_USER_ID. Failing closed.",
+                len(enabled_users)
+            )
+            return False
+        target_user_id = enabled_users[0]
+        masked_id = _mask_user_id(target_user_id)
+        logger.info("Unambiguously selected single enabled account (%s) for test email.", masked_id)
+
+    user = user_store.get_user_by_id(target_user_id)
+    if not user:
+        logger.error("Test email aborted: Account (%s) not found in user store. Failing closed.", masked_id)
+        return False
 
     try:
         credentials = get_authorized_credentials(target_user_id, user_store)
     except Exception as exc:
         sanitized_exc = _sanitize_diagnostic_message(str(exc))
-        logger.error("Failed to load Google credentials for selected account: %s", sanitized_exc)
+        logger.error("Test email aborted: Account (%s) is not authorized with valid Google credentials: %s", masked_id, sanitized_exc)
+        return False
+
+    if not credentials:
+        logger.error("Test email aborted: Account (%s) has no valid Google credentials.", masked_id)
         return False
 
     # 3. Fetch at most one real assignment from Google Classroom
@@ -253,13 +288,20 @@ def run_test_email(
         logger.error("Failed to initialize Google Classroom client: %s", sanitized_exc)
         return False
 
-    candidate_courses = []
-    if course_id and course_id.strip():
-        cid = course_id.strip()
+    found_assignment = None
+    target_course_name = "Classroom Course"
+
+    effective_course_id = (course_id.strip() if course_id else None) or (os.getenv("TEST_COURSE_ID", "").strip() or None)
+
+    if effective_course_id:
+        cid = effective_course_id
         try:
             course = client.courses().get(id=cid).execute()
             if isinstance(course, dict):
-                candidate_courses.append(course)
+                target_course_name = course.get("name") or "Unnamed Course"
+            else:
+                logger.error("Course '%s' returned invalid data.", cid)
+                return False
         except Exception as exc:
             sanitized_exc = _sanitize_diagnostic_message(str(exc))
             resp = getattr(exc, "resp", None)
@@ -268,47 +310,79 @@ def run_test_email(
             else:
                 logger.error("Failed to fetch course '%s': %s", cid, sanitized_exc)
             return False
-    else:
+
         try:
-            courses_resp = client.courses().list(pageSize=20).execute()
-            all_courses = courses_resp.get("courses", []) if isinstance(courses_resp, dict) else []
-            candidate_courses = [
-                c for c in all_courses
-                if isinstance(c, dict) and c.get("courseState", "ACTIVE") == "ACTIVE" and c.get("id")
-            ]
-        except Exception as exc:
-            sanitized_exc = _sanitize_diagnostic_message(str(exc))
-            resp = getattr(exc, "resp", None)
-            if getattr(resp, "status", None) == 403 or "403" in str(exc):
-                logger.error("Google Classroom HTTP 403 Forbidden listing courses: %s", sanitized_exc)
-            else:
-                logger.error("Failed to list Google Classroom courses: %s", sanitized_exc)
-            return False
-
-    if not candidate_courses:
-        logger.info("No active courses found. Exiting test without sending email.")
-        return False
-
-    found_assignment = None
-    target_course_name = "Classroom Course"
-
-    for course in candidate_courses:
-        c_id = course.get("id")
-        c_name = course.get("name") or "Unnamed Course"
-        try:
-            cw_res = client.courses().courseWork().list(courseId=c_id, pageSize=10).execute()
+            cw_res = client.courses().courseWork().list(courseId=cid, pageSize=10).execute()
             cw_items = cw_res.get("courseWork", []) if isinstance(cw_res, dict) else []
             if cw_items and isinstance(cw_items, list):
                 found_assignment = cw_items[0]
-                target_course_name = c_name
-                break
         except Exception as exc:
             sanitized_exc = _sanitize_diagnostic_message(str(exc))
             resp = getattr(exc, "resp", None)
             if getattr(resp, "status", None) == 403 or "403" in str(exc):
-                logger.error("Google Classroom HTTP 403 Forbidden on course '%s': %s", c_name, sanitized_exc)
+                logger.error("Google Classroom HTTP 403 Forbidden on course '%s': %s", target_course_name, sanitized_exc)
                 return False
-            logger.warning("Error checking coursework for course '%s': %s", c_name, sanitized_exc)
+            logger.warning("Error checking coursework for course '%s': %s", target_course_name, sanitized_exc)
+    else:
+        # Paginated course discovery with reasonable page and quota limits
+        max_course_pages = 3
+        course_pages_fetched = 0
+        page_token = None
+        checked_courses = 0
+        max_courses_to_check = 50
+
+        while course_pages_fetched < max_course_pages and not found_assignment:
+            params = {"pageSize": 50}
+            if page_token:
+                params["pageToken"] = page_token
+
+            try:
+                courses_resp = client.courses().list(**params).execute()
+            except Exception as exc:
+                sanitized_exc = _sanitize_diagnostic_message(str(exc))
+                resp = getattr(exc, "resp", None)
+                if getattr(resp, "status", None) == 403 or "403" in str(exc):
+                    logger.error("Google Classroom HTTP 403 Forbidden listing courses: %s", sanitized_exc)
+                else:
+                    logger.error("Failed to list Google Classroom courses: %s", sanitized_exc)
+                return False
+
+            raw_courses = courses_resp.get("courses", []) if isinstance(courses_resp, dict) else []
+            candidate_courses = [
+                c for c in raw_courses
+                if isinstance(c, dict) and c.get("courseState", "ACTIVE") == "ACTIVE" and c.get("id")
+            ]
+
+            for course in candidate_courses:
+                checked_courses += 1
+                c_id = course.get("id")
+                c_name = course.get("name") or "Unnamed Course"
+                try:
+                    cw_res = client.courses().courseWork().list(courseId=c_id, pageSize=10).execute()
+                    cw_items = cw_res.get("courseWork", []) if isinstance(cw_res, dict) else []
+                    if cw_items and isinstance(cw_items, list):
+                        found_assignment = cw_items[0]
+                        target_course_name = c_name
+                        break
+                except Exception as exc:
+                    sanitized_exc = _sanitize_diagnostic_message(str(exc))
+                    resp = getattr(exc, "resp", None)
+                    if getattr(resp, "status", None) == 403 or "403" in str(exc):
+                        logger.error("Google Classroom HTTP 403 Forbidden on course '%s': %s", c_name, sanitized_exc)
+                        return False
+                    logger.warning("Error checking coursework for course '%s': %s", c_name, sanitized_exc)
+
+                if checked_courses >= max_courses_to_check:
+                    logger.info("Reached maximum course check quota limit (%d).", max_courses_to_check)
+                    break
+
+            if found_assignment or checked_courses >= max_courses_to_check:
+                break
+
+            page_token = courses_resp.get("nextPageToken") if isinstance(courses_resp, dict) else None
+            course_pages_fetched += 1
+            if not page_token:
+                break
 
     if not found_assignment:
         logger.info("No assignments found in accessible courses. Exiting test without sending email.")
@@ -447,25 +521,26 @@ def main() -> None:
 
     for user_id in enabled_users:
         user = user_store.get_user_by_id(user_id)
+        masked_user = _mask_user_id(user_id)
         if not user:
-            logger.warning("User %s is enabled but does not exist in UserStore", user_id)
+            logger.warning("User %s is enabled but does not exist in UserStore", masked_user)
             continue
 
         try:
             credentials = get_authorized_credentials(user_id, user_store)
         except Exception as exc:
-            logger.warning("Could not fetch credentials for user %s: %s", user_id, exc)
+            logger.warning("Could not fetch credentials for user %s: %s", masked_user, exc)
             continue
 
         if is_dry_run:
             run_diagnostics(user_id, credentials, config)
         else:
-            logger.info("Running poll cycle for user %s", user_id)
+            logger.info("Running poll cycle for user %s", masked_user)
             try:
                 services = build_user_services(user_id, credentials, to_email=user.email)
                 services.run_poll_cycle()
             except Exception as exc:
-                logger.error("Poll cycle failed for user %s: %s", user_id, exc, exc_info=True)
+                logger.error("Poll cycle failed for user %s: %s", masked_user, exc, exc_info=True)
 
     if is_dry_run:
         logger.info("Dry run diagnostics complete")

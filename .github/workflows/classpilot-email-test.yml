@@ -61,8 +61,9 @@ jobs:
           SMTP_PORT: ${{ vars.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
-          PYTHONPATH: vendor_classroom_suite_mcp/src
           TEST_RECIPIENT_EMAIL: ${{ inputs.recipient_email }}
           TEST_COURSE_ID: ${{ inputs.course_id }}
+          TEST_USER_ID: ${{ secrets.TEST_USER_ID || vars.TEST_USER_ID }}
         run: |
-          python -m classpilot.job --test-email --recipient-email "${{ inputs.recipient_email }}" ${TEST_COURSE_ID:+--course-id "$TEST_COURSE_ID"}
+          python -m classpilot.job --test-email
+

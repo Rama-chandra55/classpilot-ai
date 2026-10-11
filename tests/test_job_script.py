@@ -1043,6 +1043,308 @@ class TestJobEmailNotificationTest(unittest.TestCase):
         mock_exit.assert_called_once_with(1)
         mock_build_services.assert_not_called()
 
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("googleapiclient.discovery.build")
+    @patch("classpilot.llm.create_llm_provider")
+    @patch("classpilot.notifier.create_notifier")
+    def test_test_email_configured_user_id_preferred(
+        self, mock_notifier_factory, mock_llm_factory, mock_build,
+        mock_get_creds, mock_user_store_cls, mock_state_store_cls
+    ):
+        """When TEST_USER_ID is provided and enabled/authorized, it is selected deterministically."""
+        from classpilot.job import run_test_email
+
+        mock_state_store = mock_state_store_cls.return_value
+        mock_state_store.get_enabled_watchers.return_value = ["user-1111", "user-2222"]
+
+        mock_user_store = mock_user_store_cls.return_value
+        mock_user_store.get_user_by_id.return_value = MagicMock(id="user-2222", email="u2@example.com")
+
+        mock_client = MagicMock()
+        mock_build.return_value = mock_client
+        mock_client.courses.return_value.list.return_value.execute.return_value = {
+            "courses": [{"id": "c101", "name": "Calculus", "courseState": "ACTIVE"}]
+        }
+        mock_client.courses.return_value.courseWork.return_value.list.return_value.execute.return_value = {
+            "courseWork": [{"id": "a1", "title": "Homework"}]
+        }
+
+        mock_llm = MagicMock()
+        mock_llm.generate_test_notification.return_value = "Test notification"
+        mock_llm_factory.return_value = mock_llm
+
+        mock_notifier = MagicMock()
+        mock_notifier_factory.return_value = mock_notifier
+
+        result = run_test_email(self.config, recipient_email="student@example.com", user_id="user-2222")
+
+        self.assertTrue(result)
+        mock_get_creds.assert_called_once_with("user-2222", mock_user_store)
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("classpilot.notifier.create_notifier")
+    def test_test_email_configured_user_id_not_enabled_fails_closed(
+        self, mock_notifier_factory, mock_get_creds, mock_user_store_cls, mock_state_store_cls
+    ):
+        """If configured TEST_USER_ID is not an enabled watcher, fails closed."""
+        from classpilot.job import run_test_email
+
+        mock_state_store = mock_state_store_cls.return_value
+        mock_state_store.get_enabled_watchers.return_value = ["user-1111"]
+
+        result = run_test_email(self.config, recipient_email="student@example.com", user_id="disabled-user")
+
+        self.assertFalse(result)
+        mock_get_creds.assert_not_called()
+        mock_notifier_factory.assert_not_called()
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("classpilot.notifier.create_notifier")
+    def test_test_email_configured_user_id_missing_in_user_store_fails_closed(
+        self, mock_notifier_factory, mock_get_creds, mock_user_store_cls, mock_state_store_cls
+    ):
+        """If configured TEST_USER_ID is enabled but missing in UserStore, fails closed."""
+        from classpilot.job import run_test_email
+
+        mock_state_store = mock_state_store_cls.return_value
+        mock_state_store.get_enabled_watchers.return_value = ["user-1111"]
+
+        mock_user_store = mock_user_store_cls.return_value
+        mock_user_store.get_user_by_id.return_value = None
+
+        result = run_test_email(self.config, recipient_email="student@example.com", user_id="user-1111")
+
+        self.assertFalse(result)
+        mock_get_creds.assert_not_called()
+        mock_notifier_factory.assert_not_called()
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("classpilot.notifier.create_notifier")
+    def test_test_email_configured_user_id_unauthorized_fails_closed(
+        self, mock_notifier_factory, mock_get_creds, mock_user_store_cls, mock_state_store_cls
+    ):
+        """If credentials cannot be retrieved for configured user, fails closed."""
+        from classpilot.job import run_test_email
+
+        mock_state_store = mock_state_store_cls.return_value
+        mock_state_store.get_enabled_watchers.return_value = ["user-1111"]
+
+        mock_user_store = mock_user_store_cls.return_value
+        mock_user_store.get_user_by_id.return_value = MagicMock(id="user-1111")
+        mock_get_creds.side_effect = Exception("OAuth revoked")
+
+        result = run_test_email(self.config, recipient_email="student@example.com", user_id="user-1111")
+
+        self.assertFalse(result)
+        mock_notifier_factory.assert_not_called()
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("classpilot.notifier.create_notifier")
+    def test_test_email_multiple_enabled_accounts_without_test_user_id_fails_closed(
+        self, mock_notifier_factory, mock_get_creds, mock_user_store_cls, mock_state_store_cls
+    ):
+        """When multiple accounts are enabled and no TEST_USER_ID is provided, fails closed on ambiguity."""
+        from classpilot.job import run_test_email
+
+        mock_state_store = mock_state_store_cls.return_value
+        mock_state_store.get_enabled_watchers.return_value = ["user-1111", "user-2222"]
+
+        result = run_test_email(self.config, recipient_email="student@example.com")
+
+        self.assertFalse(result)
+        mock_get_creds.assert_not_called()
+        mock_notifier_factory.assert_not_called()
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("classpilot.notifier.create_notifier")
+    def test_test_email_zero_enabled_accounts_fails_closed(
+        self, mock_notifier_factory, mock_get_creds, mock_user_store_cls, mock_state_store_cls
+    ):
+        """When zero accounts are enabled, fails closed."""
+        from classpilot.job import run_test_email
+
+        mock_state_store = mock_state_store_cls.return_value
+        mock_state_store.get_enabled_watchers.return_value = []
+
+        result = run_test_email(self.config, recipient_email="student@example.com")
+
+        self.assertFalse(result)
+        mock_get_creds.assert_not_called()
+        mock_notifier_factory.assert_not_called()
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("classpilot.job.logger")
+    def test_test_email_does_not_expose_full_user_id_in_logs(
+        self, mock_logger, mock_get_creds, mock_user_store_cls, mock_state_store_cls
+    ):
+        """Full user IDs are masked and never exposed in logs."""
+        from classpilot.job import run_test_email
+
+        sensitive_user_id = "sensitive-college-uuid-12345678"
+        mock_state_store = mock_state_store_cls.return_value
+        mock_state_store.get_enabled_watchers.return_value = [sensitive_user_id]
+
+        mock_user_store = mock_user_store_cls.return_value
+        mock_user_store.get_user_by_id.return_value = MagicMock(id=sensitive_user_id)
+        mock_get_creds.side_effect = Exception("OAuth revoked")
+
+        run_test_email(self.config, recipient_email="student@example.com", user_id=sensitive_user_id)
+
+        # Check all logged calls
+        for call_item in mock_logger.method_calls:
+            args = call_item.args
+            for arg in args:
+                self.assertNotIn(
+                    sensitive_user_id,
+                    str(arg),
+                    f"Full sensitive user ID leaked in log call: {call_item}"
+                )
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("googleapiclient.discovery.build")
+    @patch("classpilot.llm.create_llm_provider")
+    @patch("classpilot.notifier.create_notifier")
+    def test_test_email_paginated_course_discovery(
+        self, mock_notifier_factory, mock_llm_factory, mock_build,
+        mock_get_creds, mock_user_store_cls, mock_state_store_cls
+    ):
+        """Paginates courses across pages until an assignment is found."""
+        from classpilot.job import run_test_email
+
+        mock_state_store = mock_state_store_cls.return_value
+        mock_state_store.get_enabled_watchers.return_value = ["usr-1234"]
+
+        mock_client = MagicMock()
+        mock_build.return_value = mock_client
+
+        # Page 1: returns course 1 with no assignments, has nextPageToken
+        # Page 2: returns course 2 with an assignment
+        page1_resp = {
+            "courses": [{"id": "c1", "name": "Course 1", "courseState": "ACTIVE"}],
+            "nextPageToken": "token-page-2",
+        }
+        page2_resp = {
+            "courses": [{"id": "c2", "name": "Course 2", "courseState": "ACTIVE"}],
+        }
+
+        mock_client.courses.return_value.list.side_effect = [
+            MagicMock(execute=MagicMock(return_value=page1_resp)),
+            MagicMock(execute=MagicMock(return_value=page2_resp)),
+        ]
+
+        def cw_side_effect(courseId, pageSize):
+            if courseId == "c1":
+                return MagicMock(execute=MagicMock(return_value={"courseWork": []}))
+            elif courseId == "c2":
+                return MagicMock(execute=MagicMock(return_value={"courseWork": [{"id": "a2", "title": "HW 2"}]}))
+            return MagicMock(execute=MagicMock(return_value={"courseWork": []}))
+
+        mock_client.courses.return_value.courseWork.return_value.list.side_effect = cw_side_effect
+
+        mock_llm = MagicMock()
+        mock_llm.generate_test_notification.return_value = "Test notification"
+        mock_llm_factory.return_value = mock_llm
+
+        mock_notifier = MagicMock()
+        mock_notifier_factory.return_value = mock_notifier
+
+        result = run_test_email(self.config, recipient_email="student@example.com")
+
+        self.assertTrue(result)
+        self.assertEqual(mock_client.courses.return_value.list.call_count, 2)
+        mock_notifier.send.assert_called_once()
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("googleapiclient.discovery.build")
+    @patch("classpilot.llm.create_llm_provider")
+    @patch("classpilot.notifier.create_notifier")
+    def test_test_email_stops_on_first_assignment_found(
+        self, mock_notifier_factory, mock_llm_factory, mock_build,
+        mock_get_creds, mock_user_store_cls, mock_state_store_cls
+    ):
+        """Stops on the first assignment found without querying subsequent courses or pages."""
+        from classpilot.job import run_test_email
+
+        mock_state_store = mock_state_store_cls.return_value
+        mock_state_store.get_enabled_watchers.return_value = ["usr-1234"]
+
+        mock_client = MagicMock()
+        mock_build.return_value = mock_client
+
+        page1_resp = {
+            "courses": [
+                {"id": "c1", "name": "Course 1", "courseState": "ACTIVE"},
+                {"id": "c2", "name": "Course 2", "courseState": "ACTIVE"},
+            ],
+            "nextPageToken": "token-page-2",
+        }
+        mock_client.courses.return_value.list.return_value.execute.return_value = page1_resp
+
+        # Course 1 has an assignment immediately
+        mock_client.courses.return_value.courseWork.return_value.list.return_value.execute.return_value = {
+            "courseWork": [{"id": "a1", "title": "HW 1"}]
+        }
+
+        mock_llm = MagicMock()
+        mock_llm.generate_test_notification.return_value = "Test notification"
+        mock_llm_factory.return_value = mock_llm
+
+        mock_notifier = MagicMock()
+        mock_notifier_factory.return_value = mock_notifier
+
+        result = run_test_email(self.config, recipient_email="student@example.com")
+
+        self.assertTrue(result)
+        # Page list only called once, courseWork only called once for c1
+        self.assertEqual(mock_client.courses.return_value.list.call_count, 1)
+        self.assertEqual(mock_client.courses.return_value.courseWork.return_value.list.call_count, 1)
+
+    def test_workflow_file_uses_env_vars_without_shell_interpolation(self):
+        """Verifies .github/workflows/classpilot-email-test.yml passes inputs via env and runs command safely."""
+        from pathlib import Path
+        import yaml
+
+        workflow_path = Path(__file__).parent.parent / ".github" / "workflows" / "classpilot-email-test.yml"
+        self.assertTrue(workflow_path.is_file(), f"Workflow file not found at {workflow_path}")
+
+        content = workflow_path.read_text(encoding="utf-8")
+        parsed = yaml.safe_load(content)
+
+        job_steps = parsed["jobs"]["run-email-test"]["steps"]
+        email_test_step = next((s for s in job_steps if s.get("name") == "Run Email Test"), None)
+        self.assertIsNotNone(email_test_step, "Could not find 'Run Email Test' step in workflow")
+
+        # Must pass inputs via env
+        env = email_test_step.get("env", {})
+        self.assertIn("TEST_RECIPIENT_EMAIL", env)
+        self.assertIn("TEST_COURSE_ID", env)
+        self.assertIn("TEST_USER_ID", env)
+
+        # Shell command in run: must NOT interpolate inputs or secrets
+        run_cmd = email_test_step.get("run", "")
+        self.assertIn("python -m classpilot.job --test-email", run_cmd)
+        self.assertNotIn("${{ inputs.recipient_email }}", run_cmd)
+        self.assertNotIn("${{ inputs.course_id }}", run_cmd)
+        self.assertNotIn("${{ secrets.", run_cmd)
+
 
 if __name__ == "__main__":
     unittest.main()
