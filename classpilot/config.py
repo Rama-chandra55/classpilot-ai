@@ -8,6 +8,7 @@ read os.environ directly - everything else receives a ClassPilotConfig object.
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -144,6 +145,14 @@ class ClassPilotConfig:
     smtp_password: str = field(default_factory=lambda: os.getenv("SMTP_PASSWORD", ""))
     notify_to_email: str = field(default_factory=lambda: os.getenv("NOTIFY_TO_EMAIL", ""))
 
+    # --- Production Email Safety Safeguards ---
+    max_notifications_per_run: int = field(
+        default_factory=lambda: int(os.getenv("MAX_NOTIFICATIONS_PER_RUN", "5"))
+    )
+    production_test_user_id: Optional[str] = field(
+        default_factory=lambda: (os.getenv("PRODUCTION_TEST_USER_ID", "").strip() or None)
+    )
+
     # --- HTTP MCP transport (Streamable HTTP for remote clients) ---
     mcp_http_host: str = field(
         default_factory=lambda: os.getenv(
@@ -169,6 +178,8 @@ class ClassPilotConfig:
                 "LLM_API_KEY is not set. Add it to your .env file "
                 "(this is the API key for whichever LLM_PROVIDER you configured)."
             )
+        if self.max_notifications_per_run < 0:
+            raise ValueError("MAX_NOTIFICATIONS_PER_RUN cannot be negative.")
         # 1. Pool bounds check
         if self.db_pool_min_size < 0:
             raise ValueError("DB_POOL_MIN_SIZE cannot be negative.")

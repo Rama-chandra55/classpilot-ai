@@ -15,7 +15,9 @@ No APScheduler threads or in-memory state are used.
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
+from .budget import NotificationBudget
 from .config import ClassPilotConfig
 from .events import EventType
 from .notification_service import NotificationService
@@ -55,11 +57,13 @@ class DeadlineScheduler:
         notification_service: NotificationService,
         config: ClassPilotConfig,
         user_id: str = DEFAULT_USER_ID,
+        budget: Optional[NotificationBudget] = None,
     ):
         self._state = state_store
         self._svc = notification_service
         self._offsets: tuple = config.deadline_alert_offsets_minutes
         self._user_id = user_id
+        self._budget = budget
 
     def evaluate_all(self) -> None:
         """
@@ -109,21 +113,47 @@ class DeadlineScheduler:
         """
         Guards against duplicate delivery with an atomic StateStore claim.
         """
-        # Atomic claim!
-        won = self._state.mark_reminder_sent(course_id, assignment_id, offset_minutes, user_id=self._user_id)
-        if not won:
+        if self._budget is not None and not self._budget.can_send():
+            self._budget.record_deferred()
+            logger.warning(
+                "Global notification budget exhausted; deferring reminder for '%s' (%s) without claiming",
+                title, self._offset_label(offset_minutes),
+            )
             return
+
+        # Atomic claim (status='pending')
+        won = self._state.claim_reminder(course_id, assignment_id, offset_minutes, user_id=self._user_id)
+        if not won:
+            if self._budget is not None:
+                self._budget.record_suppressed()
+            return
+
+        if self._budget is not None:
+            self._budget.record_attempt()
 
         label = self._offset_label(offset_minutes)
         logger.info("Firing %s reminder for '%s' (user_id=%s)", label, title, self._user_id)
 
-        delivered = self._svc.notify(EventType.DEADLINE_REMINDER, title)
+        delivered = False
+        try:
+            delivered = self._svc.notify(EventType.DEADLINE_REMINDER, title)
+        except Exception as exc:
+            logger.error("Error firing reminder notification for '%s': %s", title, exc)
+            delivered = False
 
-        if delivered:
+        if delivered is True:
+            self._state.mark_reminder_sent_success(course_id, assignment_id, offset_minutes, user_id=self._user_id)
+            if self._budget is not None:
+                self._budget.record_success()
             logger.info("Reminder delivered: '%s' (%s)", title, label)
         else:
-            logger.error(
-                "Reminder delivery failed for '%s' (%s) — will NOT retry automatically",
+            self._state.mark_reminder_retryable(
+                course_id, assignment_id, offset_minutes, error="Reminder delivery failed", user_id=self._user_id
+            )
+            if self._budget is not None:
+                self._budget.record_failure()
+            logger.warning(
+                "Reminder delivery failed for '%s' (%s) — claim marked retryable for recovery",
                 title, label,
             )
 

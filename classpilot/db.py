@@ -126,14 +126,26 @@ CREATE TABLE IF NOT EXISTS mcp_auth_codes (
 -- Moved from SQLite (state_store.py) to PostgreSQL.
 -- Tracks known assignments and sent reminders to deduplicate notifications.
 CREATE TABLE IF NOT EXISTS known_assignments (
-    user_id         TEXT NOT NULL DEFAULT 'default',
-    course_id       TEXT NOT NULL,
-    assignment_id   TEXT NOT NULL,
-    title           TEXT,
-    due_date_json   TEXT,
-    due_time_json   TEXT,
-    first_seen_at   TIMESTAMPTZ DEFAULT now(),
-    last_updated_at TIMESTAMPTZ DEFAULT now(),
+    user_id               TEXT NOT NULL DEFAULT 'default',
+    course_id             TEXT NOT NULL,
+    assignment_id         TEXT NOT NULL,
+    title                 TEXT,
+    due_date_json         TEXT,
+    due_time_json         TEXT,
+    first_seen_at         TIMESTAMPTZ DEFAULT now(),
+    last_updated_at       TIMESTAMPTZ DEFAULT now(),
+    status                TEXT NOT NULL DEFAULT 'sent',
+    claimed_at            TIMESTAMPTZ DEFAULT now(),
+    sent_at               TIMESTAMPTZ DEFAULT now(),
+    retry_count           INTEGER NOT NULL DEFAULT 0,
+    last_error            TEXT,
+    deadline_status       TEXT NOT NULL DEFAULT 'sent',
+    deadline_claimed_at   TIMESTAMPTZ,
+    deadline_sent_at      TIMESTAMPTZ,
+    deadline_retry_count  INTEGER NOT NULL DEFAULT 0,
+    deadline_last_error   TEXT,
+    pending_due_date_json TEXT,
+    pending_due_time_json TEXT,
     PRIMARY KEY (user_id, course_id, assignment_id)
 );
 
@@ -143,6 +155,10 @@ CREATE TABLE IF NOT EXISTS sent_reminders (
     assignment_id   TEXT NOT NULL,
     offset_minutes  INTEGER NOT NULL,
     sent_at         TIMESTAMPTZ DEFAULT now(),
+    status          TEXT NOT NULL DEFAULT 'sent',
+    claimed_at      TIMESTAMPTZ DEFAULT now(),
+    retry_count     INTEGER NOT NULL DEFAULT 0,
+    last_error      TEXT,
     PRIMARY KEY (user_id, course_id, assignment_id, offset_minutes)
 );
 
@@ -230,6 +246,7 @@ def init_schema() -> None:
         conn.execute(_SCHEMA)
         _migrate_add_code_verifier_column(conn)
         _migrate_add_mcp_columns(conn)
+        _migrate_notification_claim_lifecycle(conn)
     logger.debug("Postgres schema ready")
 
 
@@ -270,3 +287,41 @@ def _migrate_add_mcp_columns(conn: psycopg.Connection) -> None:
         conn.execute("ALTER TABLE oauth_states ADD COLUMN mcp_state TEXT")
         conn.execute("ALTER TABLE oauth_states ADD COLUMN mcp_resource TEXT")
         logger.info("Migrated existing 'oauth_states' table: added MCP columns")
+
+
+def _migrate_notification_claim_lifecycle(conn: psycopg.Connection) -> None:
+    """
+    Safely and backward-compatibly migrate known_assignments and sent_reminders
+    to support the concurrency-safe claim lifecycle (pending, sent, retryable).
+    Existing records default to 'sent' so historical notifications are preserved.
+    """
+    known_cols = [
+        ("status", "TEXT NOT NULL DEFAULT 'sent'"),
+        ("claimed_at", "TIMESTAMPTZ DEFAULT now()"),
+        ("sent_at", "TIMESTAMPTZ DEFAULT now()"),
+        ("retry_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_error", "TEXT"),
+        ("deadline_status", "TEXT NOT NULL DEFAULT 'sent'"),
+        ("deadline_claimed_at", "TIMESTAMPTZ"),
+        ("deadline_sent_at", "TIMESTAMPTZ"),
+        ("deadline_retry_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("deadline_last_error", "TEXT"),
+        ("pending_due_date_json", "TEXT"),
+        ("pending_due_time_json", "TEXT"),
+    ]
+    for col, col_type in known_cols:
+        conn.execute(
+            f"ALTER TABLE known_assignments ADD COLUMN IF NOT EXISTS {col} {col_type}"
+        )
+
+    reminder_cols = [
+        ("status", "TEXT NOT NULL DEFAULT 'sent'"),
+        ("claimed_at", "TIMESTAMPTZ DEFAULT now()"),
+        ("retry_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("last_error", "TEXT"),
+    ]
+    for col, col_type in reminder_cols:
+        conn.execute(
+            f"ALTER TABLE sent_reminders ADD COLUMN IF NOT EXISTS {col} {col_type}"
+        )
+    logger.debug("Claim lifecycle migration verified")

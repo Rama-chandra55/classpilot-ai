@@ -15,6 +15,7 @@ import logging
 
 from classpilot.config import get_config
 from classpilot.logging_setup import configure_logging
+from classpilot.budget import NotificationBudget
 from classpilot.user_store import UserStore
 from classpilot.google_oauth import get_authorized_credentials
 from classpilot.services import build_user_services
@@ -542,13 +543,56 @@ def main() -> None:
         logger.info("Starting ClassPilot background job execution")
 
     state_store = StateStore()
+    user_store = UserStore()
     enabled_users = state_store.get_enabled_watchers()
+
+    # If PRODUCTION_TEST_USER_ID is configured, restrict execution to that authorized account.
+    # Fail closed if the configured account is invalid, disabled, or unauthorized.
+    target_user_id = config.production_test_user_id
+    if target_user_id:
+        masked_target = _mask_user_id(target_user_id)
+        logger.info("PRODUCTION_TEST_USER_ID is configured: restricting execution to %s", masked_target)
+
+        user_record = user_store.get_user_by_id(target_user_id)
+        if not user_record:
+            logger.error("PRODUCTION_TEST_USER_ID %s does not exist in UserStore. Failing closed.", masked_target)
+            sys.exit(1)
+            return
+
+        if target_user_id not in enabled_users:
+            logger.error("PRODUCTION_TEST_USER_ID %s does not have an enabled watcher. Failing closed.", masked_target)
+            sys.exit(1)
+            return
+
+        try:
+            _ = get_authorized_credentials(target_user_id, user_store)
+        except Exception as exc:
+            logger.error(
+                "PRODUCTION_TEST_USER_ID %s is not authorized with valid Google credentials: %s. Failing closed.",
+                masked_target,
+                exc,
+            )
+            sys.exit(1)
+            return
+
+        enabled_users = [target_user_id]
 
     if not enabled_users:
         logger.info("No users have the watcher enabled. Exiting.")
         return
 
-    user_store = UserStore()
+    budget: Optional[NotificationBudget] = None
+    if not is_dry_run:
+        budget = NotificationBudget(limit=config.max_notifications_per_run)
+        logger.info(
+            "Enforcing global notification budget: %d maximum notification(s) per run",
+            budget.limit,
+        )
+        # Recover any abandoned pending claims from interrupted prior runs
+        try:
+            state_store.recover_abandoned_claims()
+        except Exception as exc:
+            logger.warning("Could not recover abandoned claims: %s", exc)
 
     for user_id in enabled_users:
         user = user_store.get_user_by_id(user_id)
@@ -568,7 +612,9 @@ def main() -> None:
         else:
             logger.info("Running poll cycle for user %s", masked_user)
             try:
-                services = build_user_services(user_id, credentials, to_email=user.email)
+                services = build_user_services(
+                    user_id, credentials, to_email=user.email, budget=budget
+                )
                 services.run_poll_cycle()
             except Exception as exc:
                 logger.error("Poll cycle failed for user %s: %s", masked_user, exc, exc_info=True)
@@ -576,6 +622,24 @@ def main() -> None:
     if is_dry_run:
         logger.info("Dry run diagnostics complete")
     else:
+        if budget is not None:
+            summary = budget.summary()
+            logger.info(
+                "Background job notification summary: attempted=%d, successful=%d, failed=%d, "
+                "deferred=%d, suppressed=%d (limit=%d, remaining=%d)",
+                summary["attempted"],
+                summary["successful"],
+                summary["failed"],
+                summary["deferred"],
+                summary["suppressed"],
+                summary["limit"],
+                summary["remaining"],
+            )
+            if summary["deferred"] > 0:
+                logger.warning(
+                    "Global notification cap reached: %d notification(s) were deferred without consuming claims",
+                    summary["deferred"],
+                )
         logger.info("Background job execution complete")
 
 

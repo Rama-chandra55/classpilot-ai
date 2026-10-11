@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from typing import Callable, List, Optional
 
 from . import study_client
+from .budget import NotificationBudget
 from .state_store import StateStore, DEFAULT_USER_ID
 
 from enum import Enum
@@ -143,11 +144,24 @@ def classify_assignment(
             created=created,
         )
 
-    # Already known - check whether the deadline changed.
+    # If the assignment claim is in retryable state from a failed delivery attempt, retry it!
+    if known.get("status") == "retryable":
+        return ClassifiedAssignment(
+            classification=AssignmentClassification.NEW,
+            course_id=course_id,
+            course_name=course_name,
+            assignment_id=assignment_id,
+            title=title,
+            due_date=due_date,
+            due_time=due_time,
+            created=created,
+        )
+
+    # Already known - check whether the deadline changed or deadline notification is retryable.
     prev_due_date = json.loads(known["due_date_json"]) if known.get("due_date_json") else None
     prev_due_time = json.loads(known["due_time_json"]) if known.get("due_time_json") else None
 
-    if prev_due_date != due_date or prev_due_time != due_time:
+    if known.get("deadline_status") == "retryable" or (prev_due_date != due_date or prev_due_time != due_time):
         return ClassifiedAssignment(
             classification=AssignmentClassification.DEADLINE_UPDATED,
             course_id=course_id,
@@ -201,16 +215,18 @@ class AssignmentWatcher:
     def __init__(
         self,
         state_store: StateStore,
-        on_event: Callable[[AssignmentEvent], None],
+        on_event: Callable[[AssignmentEvent], Optional[bool]],
         credentials,
         user_id: str = DEFAULT_USER_ID,
         filter_historical: bool = True,
         now: Optional[datetime] = None,
+        budget: Optional[NotificationBudget] = None,
     ):
         """
         Args:
             state_store: StateStore used to dedupe across polls/restarts.
             on_event: Callback invoked once per detected AssignmentEvent.
+                      Returns True if delivered, False if failed, or None.
             credentials: google.oauth2.credentials.Credentials for the
                          user this watcher polls Classroom on behalf of.
             user_id: identifies whose dedup state to read/write in
@@ -219,6 +235,7 @@ class AssignmentWatcher:
             filter_historical: if True, suppresses 'new' events for historical assignments
                                (e.g. past due dates) on first startup or subsequent polls.
             now: reference datetime for historical checking (defaults to utcnow).
+            budget: optional NotificationBudget enforcing global notification limit.
         """
         self._state = state_store
         self._on_event = on_event
@@ -226,6 +243,7 @@ class AssignmentWatcher:
         self._user_id = user_id
         self._filter_historical = filter_historical
         self._now = now
+        self._budget = budget
 
     def check_once(self) -> List[AssignmentEvent]:
         """
@@ -262,12 +280,44 @@ class AssignmentWatcher:
                 event = self._process_assignment(course_id, course_name, assignment)
                 if event:
                     events.append(event)
+                    delivered = None
                     try:
-                        self._on_event(event)
+                        delivered = self._on_event(event)
                     except Exception:
                         logger.error(
                             "on_event handler failed for assignment %s",
                             event.assignment_id, exc_info=True,
+                        )
+                        delivered = False
+
+                    if delivered is True:
+                        if event.kind == "new":
+                            self._state.mark_assignment_sent(
+                                event.course_id, event.assignment_id, user_id=self._user_id
+                            )
+                        elif event.kind == "deadline_updated":
+                            self._state.mark_deadline_update_sent(
+                                event.course_id, event.assignment_id, user_id=self._user_id
+                            )
+                        if self._budget:
+                            self._budget.record_success()
+                        logger.info("Notification successfully delivered: '%s' (%s)", event.title, event.kind)
+                    else:
+                        # Delivery failed or returned False! Mark retryable (deduplication strictly preserved)
+                        err_msg = "Notification delivery failed or unconfirmed"
+                        if event.kind == "new":
+                            self._state.mark_assignment_retryable(
+                                event.course_id, event.assignment_id, error=err_msg, user_id=self._user_id
+                            )
+                        elif event.kind == "deadline_updated":
+                            self._state.mark_deadline_update_retryable(
+                                event.course_id, event.assignment_id, error=err_msg, user_id=self._user_id
+                            )
+                        if self._budget:
+                            self._budget.record_failure()
+                        logger.warning(
+                            "Delivery failed for '%s' (%s) — claim marked retryable for safe recovery",
+                            event.title, course_name,
                         )
 
         logger.info(
@@ -292,7 +342,7 @@ class AssignmentWatcher:
             return None
 
         if classified.classification == AssignmentClassification.HISTORICAL_BASELINE:
-            self._state.record_new_assignment(
+            self._state.record_baseline_assignment(
                 classified.course_id,
                 classified.assignment_id,
                 classified.title,
@@ -300,11 +350,22 @@ class AssignmentWatcher:
                 classified.due_time,
                 user_id=self._user_id,
             )
+            if self._budget:
+                self._budget.record_suppressed()
             logger.info("Historical assignment baseline recorded (no notification): %s (%s)", classified.title, course_name)
             return None
 
         elif classified.classification == AssignmentClassification.NEW:
-            won = self._state.record_new_assignment(
+            if self._budget and not self._budget.can_send():
+                logger.info(
+                    "Skipping new assignment notification for '%s' (%s): "
+                    "MAX_NOTIFICATIONS_PER_RUN limit reached. Claim deferred.",
+                    classified.title, course_name,
+                )
+                self._budget.record_deferred()
+                return None
+
+            won = self._state.claim_new_assignment(
                 classified.course_id,
                 classified.assignment_id,
                 classified.title,
@@ -313,9 +374,15 @@ class AssignmentWatcher:
                 user_id=self._user_id,
             )
             if not won:
-                # Another worker claimed it first
+                # Already claimed or unchanged
+                if self._budget:
+                    self._budget.record_suppressed()
                 return None
-            logger.info("New assignment detected: %s (%s)", classified.title, course_name)
+
+            if self._budget:
+                self._budget.record_attempt()
+
+            logger.info("New assignment claimed (pending delivery): %s (%s)", classified.title, course_name)
             return AssignmentEvent(
                 kind="new",
                 course_id=classified.course_id,
@@ -327,11 +394,20 @@ class AssignmentWatcher:
             )
 
         elif classified.classification == AssignmentClassification.DEADLINE_UPDATED:
+            if self._budget and not self._budget.can_send():
+                logger.info(
+                    "Skipping deadline update notification for '%s' (%s): "
+                    "MAX_NOTIFICATIONS_PER_RUN limit reached. Claim deferred.",
+                    classified.title, course_name,
+                )
+                self._budget.record_deferred()
+                return None
+
             known = self._state.get_known_assignment(classified.course_id, classified.assignment_id, user_id=self._user_id)
             old_due_date_json = known.get("due_date_json") if known else None
             old_due_time_json = known.get("due_time_json") if known else None
 
-            won = self._state.update_assignment_deadline(
+            won = self._state.claim_deadline_update(
                 classified.course_id,
                 classified.assignment_id,
                 classified.title,
@@ -342,9 +418,14 @@ class AssignmentWatcher:
                 user_id=self._user_id,
             )
             if not won:
-                # Another worker changed the deadline first
+                if self._budget:
+                    self._budget.record_suppressed()
                 return None
-            logger.info("Deadline change detected: %s (%s)", classified.title, course_name)
+
+            if self._budget:
+                self._budget.record_attempt()
+
+            logger.info("Deadline change claimed (pending delivery): %s (%s)", classified.title, course_name)
             return AssignmentEvent(
                 kind="deadline_updated",
                 course_id=classified.course_id,
@@ -358,6 +439,8 @@ class AssignmentWatcher:
             )
 
         # UNCHANGED
+        if self._budget:
+            self._budget.record_suppressed()
         return None
 
 

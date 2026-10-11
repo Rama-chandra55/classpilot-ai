@@ -19,6 +19,7 @@ Phase 5B Job Architecture:
 import logging
 from typing import Optional
 
+from .budget import NotificationBudget
 from .config import ClassPilotConfig, get_config
 from .deadline_scheduler import DeadlineScheduler
 from .events import EventType
@@ -43,10 +44,12 @@ class AppServices:
         user_id: str,
         credentials,
         to_email: Optional[str] = None,
+        budget: Optional[NotificationBudget] = None,
     ):
         self.config = config
         self.user_id = user_id
         self.credentials = credentials
+        self.budget = budget
 
         self.state_store = StateStore()
 
@@ -55,7 +58,7 @@ class AppServices:
         self.notification_service = NotificationService(llm_provider, notifier)
 
         self.deadline_scheduler = DeadlineScheduler(
-            self.state_store, self.notification_service, config, user_id=user_id,
+            self.state_store, self.notification_service, config, user_id=user_id, budget=self.budget,
         )
 
         self.watcher = AssignmentWatcher(
@@ -64,15 +67,17 @@ class AppServices:
             credentials=self.credentials,
             user_id=self.user_id,
             filter_historical=True,
+            budget=self.budget,
         )
 
     # ── Event dispatch ────────────────────────────────────────────────────────
 
-    def _handle_event(self, event: AssignmentEvent) -> None:
+    def _handle_event(self, event: AssignmentEvent) -> bool:
         if event.kind == "new":
-            self.notification_service.notify(EventType.NEW_ASSIGNMENT, event.title)
+            return self.notification_service.notify(EventType.NEW_ASSIGNMENT, event.title)
         elif event.kind == "deadline_updated":
-            self.notification_service.notify(EventType.DEADLINE_UPDATED, event.title)
+            return self.notification_service.notify(EventType.DEADLINE_UPDATED, event.title)
+        return False
 
     # ── Job Execution ─────────────────────────────────────────────────────────
     
@@ -112,9 +117,19 @@ def build_services(validate: bool = True) -> AppServices:
     return AppServices(config, user_id=DEFAULT_USER_ID, credentials=credentials)
 
 
-def build_user_services(user_id: str, credentials, to_email: Optional[str] = None) -> AppServices:
+def build_user_services(
+    user_id: str,
+    credentials,
+    to_email: Optional[str] = None,
+    budget: Optional[NotificationBudget] = None,
+) -> AppServices:
     """
     Phase 3 identified-user entrypoint — used by server.py and job.py.
     """
     config = get_config()
-    return AppServices(config, user_id=user_id, credentials=credentials, to_email=to_email)
+    if config.production_test_user_id and user_id != config.production_test_user_id:
+        raise PermissionError(
+            f"Safety check: PRODUCTION_TEST_USER_ID is active; refusing to build "
+            f"services for non-allowlisted user '{user_id}'."
+        )
+    return AppServices(config, user_id=user_id, credentials=credentials, to_email=to_email, budget=budget)
