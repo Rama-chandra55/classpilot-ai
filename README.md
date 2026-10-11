@@ -592,7 +592,7 @@ data directly.
 |---|---|---|
 | `LLM_PROVIDER` | `gemini` | `gemini` (free), `groq` (free), `anthropic` (paid) — used for watcher notification text only |
 | `LLM_API_KEY` | — | Your API key for the chosen provider |
-| `LLM_MODEL` | `gemini-1.5-flash` | Model name |
+| `LLM_MODEL` | `gemini-2.5-flash-lite` | Model name |
 | `WATCH_INTERVAL_MINUTES` | `15` | Classroom polling interval for the watcher |
 | `STATE_DB_PATH` | `classpilot_state.db` | SQLite dedup database for the watcher |
 | `NOTIFIER_BACKEND` | `email` | `email` (more coming) |

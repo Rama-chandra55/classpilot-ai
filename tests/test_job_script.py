@@ -258,6 +258,40 @@ class TestJobDiagnostics(unittest.TestCase):
         mock_logger.info.assert_any_call("   [PASS] Successfully generated text using %s", "groq")
 
     @patch("classpilot.job.logger")
+    def test_run_diagnostics_with_gemini_provider(self, mock_logger):
+        """Verify diagnostics flow functions with LLM_PROVIDER=gemini."""
+        from classpilot.job import run_diagnostics
+        from classpilot.config import ClassPilotConfig
+
+        config = ClassPilotConfig(
+            llm_provider="gemini",
+            llm_api_key="test-gemini-key",
+            llm_model="gemini-2.5-flash-lite",
+            notifier_backend="email",
+            smtp_host="smtp.example.com",
+            smtp_port=587,
+            smtp_user="test@example.com",
+            smtp_password="password",
+        )
+
+        mock_creds = MagicMock()
+        with patch("googleapiclient.discovery.build") as mock_build, \
+             patch("classpilot.llm.create_llm_provider") as mock_llm_factory, \
+             patch("smtplib.SMTP"):
+
+            mock_client = MagicMock()
+            mock_build.return_value = mock_client
+            mock_client.courses.return_value.list.return_value.execute.return_value = {"courses": []}
+
+            mock_llm = MagicMock()
+            mock_llm.generate_message.return_value = "Gemini notification"
+            mock_llm_factory.return_value = mock_llm
+
+            run_diagnostics("user_1", mock_creds, config)
+
+        mock_logger.info.assert_any_call("   [PASS] Successfully generated text using %s", "gemini")
+
+    @patch("classpilot.job.logger")
     def test_classroom_failure_does_not_prevent_llm_and_smtp(self, mock_logger):
         """Regression test: Classroom failure must not block Groq/LLM or SMTP diagnostics."""
         from classpilot.job import run_diagnostics

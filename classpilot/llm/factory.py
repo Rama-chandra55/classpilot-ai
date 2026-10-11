@@ -6,7 +6,7 @@ Adding a new provider = one new file + one entry in _PROVIDER_REGISTRY.
 Nothing else in the codebase needs to change.
 
 FREE providers available out of the box:
-  gemini  — Google Gemini (gemini-1.5-flash), free via aistudio.google.com
+  gemini  — Google Gemini (gemini-2.5-flash-lite), free via aistudio.google.com
   groq    — Groq (llama-3.1-8b-instant), free via console.groq.com
 
 Paid provider:
@@ -32,8 +32,9 @@ def create_llm_provider(config) -> LLMProvider:
     logger.info("Initializing LLM provider: %s (model=%s)", name, config.llm_model)
 
     if name == "gemini":
-        from .gemini_provider import GeminiProvider
-        return GeminiProvider(api_key=config.llm_api_key, model=config.llm_model)
+        from .gemini_provider import GeminiProvider, DEFAULT_MODEL
+        model = config.llm_model if (config.llm_model and config.llm_model != "claude-sonnet-4-6") else DEFAULT_MODEL
+        return GeminiProvider(api_key=config.llm_api_key, model=model)
 
     if name == "groq":
         from .groq_provider import GroqProvider

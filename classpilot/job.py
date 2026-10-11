@@ -41,7 +41,7 @@ def run_diagnostics(user_id: str, credentials, config) -> None:
     except Exception as exc:
         logger.error("   [FAIL] Classroom fetch failed: %s", exc)
 
-    # 2. Verify Groq (LLM) configuration
+    # 2. Verify LLM configuration
     try:
         logger.info("2. Verifying LLM (%s) configuration...", config.llm_provider)
         from classpilot.llm import create_llm_provider

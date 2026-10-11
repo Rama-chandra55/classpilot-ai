@@ -20,12 +20,24 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return val.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _default_llm_model() -> str:
+    val = os.getenv("LLM_MODEL")
+    if val and val.strip():
+        return val.strip()
+    provider = os.getenv("LLM_PROVIDER", "gemini").lower().strip()
+    if provider == "gemini":
+        return "gemini-2.5-flash-lite"
+    if provider == "groq":
+        return "llama-3.1-8b-instant"
+    return "claude-sonnet-4-6"
+
+
 @dataclass
 class ClassPilotConfig:
     # --- LLM (provider-agnostic) ---
-    llm_provider: str = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "anthropic"))
+    llm_provider: str = field(default_factory=lambda: os.getenv("LLM_PROVIDER", "gemini"))
     llm_api_key: str = field(default_factory=lambda: os.getenv("LLM_API_KEY", ""))
-    llm_model: str = field(default_factory=lambda: os.getenv("LLM_MODEL", "claude-sonnet-4-6"))
+    llm_model: str = field(default_factory=_default_llm_model)
 
     # --- Watcher ---
     watch_interval_minutes: int = field(

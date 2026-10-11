@@ -29,6 +29,9 @@ _stub_module(
     "dotenv",
     "fastmcp",
     "fastmcp.utilities.types",
+    "google.genai",
+    "google.genai.types",
+    "google.genai.errors",
     "google.auth.transport.requests",
     "google.oauth2.credentials",
     "google.oauth2.id_token",
@@ -39,6 +42,25 @@ _stub_module(
     "apscheduler.schedulers.blocking",
     "apscheduler.executors.pool",
 )
+
+# google.genai stubs
+class _GenAIAPIError(Exception):
+    def __init__(self, code=500, response_json=None, *args, **kwargs):
+        super().__init__(f"{code} {response_json}")
+        self.code = code
+        self.response_json = response_json
+
+sys.modules["google.genai.errors"].APIError = _GenAIAPIError
+sys.modules["google.genai.errors"].ClientError = type("ClientError", (_GenAIAPIError,), {})
+sys.modules["google.genai.errors"].ServerError = type("ServerError", (_GenAIAPIError,), {})
+
+class _GenerateContentConfig:
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+sys.modules["google.genai.types"].GenerateContentConfig = _GenerateContentConfig
+sys.modules["google.genai"].Client = object
 
 # dotenv stub: load_dotenv() is a no-op in tests
 sys.modules["dotenv"].load_dotenv = lambda *a, **k: None
