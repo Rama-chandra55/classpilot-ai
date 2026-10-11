@@ -1,9 +1,8 @@
 name: ClassPilot Watcher
 
 on:
-  # Recurring production watcher schedule is disabled for safety.
-  # schedule:
-  #   - cron: '7,37 * * * *'
+  schedule:
+    - cron: '7,37 * * * *'
   workflow_dispatch:
 
 concurrency:
@@ -41,6 +40,16 @@ jobs:
           echo "CREDS_PATH=$CREDS_PATH" >> "$GITHUB_OUTPUT"
         env:
           GOOGLE_WEB_CREDENTIALS_JSON: ${{ secrets.GOOGLE_WEB_CREDENTIALS_JSON }}
+
+      - name: Verify Authorized Account
+        run: |
+          if [ -z "$PRODUCTION_TEST_USER_ID" ]; then
+            echo "::error::PRODUCTION_TEST_USER_ID is missing or unset. Failing closed to protect all users."
+            exit 1
+          fi
+          echo "Authorized test user ID is configured."
+        env:
+          PRODUCTION_TEST_USER_ID: ${{ secrets.PRODUCTION_TEST_USER_ID || vars.PRODUCTION_TEST_USER_ID || secrets.TEST_USER_ID || vars.TEST_USER_ID }}
 
       - name: Run Background Watcher
         env:
