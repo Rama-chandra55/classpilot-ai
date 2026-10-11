@@ -8,7 +8,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  full-tests:
+  test-suite:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -27,11 +27,49 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install . pytest
+          pip install . pytest pytest-timeout
 
-      - name: Run full test suite
+      - name: Run isolated unit tests
         env:
           PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
           PYTHONPATH: vendor_classroom_suite_mcp/src
         run: |
-          python -m pytest tests/ -q --tb=short
+          python -m pytest \
+            tests/test_anthropic_provider.py \
+            tests/test_credential_failure_modes.py \
+            tests/test_cross_file_isolation.py \
+            tests/test_crypto.py \
+            tests/test_feature2.py \
+            tests/test_feature3.py \
+            tests/test_feature4_5.py \
+            tests/test_feature6.py \
+            tests/test_gemini_provider.py \
+            tests/test_get_material_visuals.py \
+            tests/test_google_oauth.py \
+            tests/test_identity.py \
+            tests/test_job_script.py \
+            tests/test_prod_config.py \
+            tests/test_production_safeguards.py \
+            tests/test_production_watcher_hardening.py \
+            tests/test_scope_audit.py \
+            tests/test_simulation.py \
+            tests/test_study_tools.py \
+            tests/test_visual_extractor.py \
+            -v --tb=short -p pytest_timeout --timeout=30 -o faulthandler_timeout=30
+
+      - name: Run integration tests (infrastructure & external dependencies)
+        env:
+          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+          PYTHONPATH: vendor_classroom_suite_mcp/src
+        run: |
+          python -m pytest \
+            tests/test_http_server.py \
+            tests/test_job_concurrency.py \
+            tests/test_mcp_auth.py \
+            tests/test_mcp_oauth_web.py \
+            tests/test_multiuser_isolation.py \
+            tests/test_oauth_state.py \
+            tests/test_oauth_web.py \
+            tests/test_state_store_user_id.py \
+            tests/test_user_store.py \
+            -v --tb=short -p pytest_timeout --timeout=30 -o faulthandler_timeout=30

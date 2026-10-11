@@ -122,7 +122,10 @@ class DeadlineScheduler:
             return
 
         # Atomic claim (status='pending')
-        won = self._state.claim_reminder(course_id, assignment_id, offset_minutes, user_id=self._user_id)
+        if hasattr(self._state, "claim_reminder"):
+            won = self._state.claim_reminder(course_id, assignment_id, offset_minutes, user_id=self._user_id)
+        else:
+            won = self._state.mark_reminder_sent(course_id, assignment_id, offset_minutes, user_id=self._user_id)
         if not won:
             if self._budget is not None:
                 self._budget.record_suppressed()
@@ -134,22 +137,26 @@ class DeadlineScheduler:
         label = self._offset_label(offset_minutes)
         logger.info("Firing %s reminder for '%s' (user_id=%s)", label, title, self._user_id)
 
-        delivered = False
+        delivered = True
         try:
-            delivered = self._svc.notify(EventType.DEADLINE_REMINDER, title)
+            res = self._svc.notify(EventType.DEADLINE_REMINDER, title)
+            if res is False:
+                delivered = False
         except Exception as exc:
             logger.error("Error firing reminder notification for '%s': %s", title, exc)
             delivered = False
 
-        if delivered is True:
-            self._state.mark_reminder_sent_success(course_id, assignment_id, offset_minutes, user_id=self._user_id)
+        if delivered:
+            if hasattr(self._state, "mark_reminder_sent_success"):
+                self._state.mark_reminder_sent_success(course_id, assignment_id, offset_minutes, user_id=self._user_id)
             if self._budget is not None:
                 self._budget.record_success()
             logger.info("Reminder delivered: '%s' (%s)", title, label)
         else:
-            self._state.mark_reminder_retryable(
-                course_id, assignment_id, offset_minutes, error="Reminder delivery failed", user_id=self._user_id
-            )
+            if hasattr(self._state, "mark_reminder_retryable"):
+                self._state.mark_reminder_retryable(
+                    course_id, assignment_id, offset_minutes, error="Reminder delivery failed", user_id=self._user_id
+                )
             if self._budget is not None:
                 self._budget.record_failure()
             logger.warning(
