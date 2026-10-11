@@ -63,6 +63,7 @@ class AppServices:
             on_event=self._handle_event,
             credentials=self.credentials,
             user_id=self.user_id,
+            filter_historical=True,
         )
 
     # ── Event dispatch ────────────────────────────────────────────────────────

@@ -340,7 +340,13 @@ class TestEmailNotifier(unittest.TestCase):
 
 class TestEndToEnd(unittest.TestCase):
     BASE = {"id": "a1", "title": "DBMS HW1",
-            "due_date": {"year": 2026, "month": 7, "day": 5}, "due_time": {"hours": 23}}
+            "due_date": {"year": 2027, "month": 7, "day": 5}, "due_time": {"hours": 23}}
+
+    def tearDown(self):
+        import classpilot.study_client as sc
+        import classpilot.watcher as wm
+        wm.study_client.fetch_courses = sc.fetch_courses
+        wm.study_client.fetch_assignments = sc.fetch_assignments
 
     def test_new_assignment_triggers_llm_and_email(self):
         assignments = [dict(self.BASE)]
@@ -374,7 +380,7 @@ class TestEndToEnd(unittest.TestCase):
         watcher = AssignmentWatcher(store, on_event=build_handle_event(svc, NullDeadlineScheduler()), credentials="fake-creds")
         watcher.check_once()
         calls_after_first = len(llm.calls)
-        assignments[0]["due_date"] = {"year": 2026, "month": 8, "day": 1}
+        assignments[0]["due_date"] = {"year": 2027, "month": 8, "day": 1}
         watcher.check_once()
         self.assertEqual(len(llm.calls), calls_after_first, "LLM fired on deadline_updated — F3 only")
         self.assertEqual(len(n.sent), 1,                    "Email fired on deadline_updated — F3 only")

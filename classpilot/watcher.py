@@ -38,12 +38,14 @@ from typing import Callable, List, Optional
 from . import study_client
 from .state_store import StateStore, DEFAULT_USER_ID
 
+from enum import Enum
+
 logger = logging.getLogger(__name__)
 
 
 def is_historical_assignment(assignment: dict, now: Optional[datetime] = None) -> bool:
     """
-    Check if an assignment is historical (e.g. deadline has already passed).
+    Check if an assignment is historical (deadline has already passed or creation is aged).
     Historical assignments should not trigger 'new assignment' notifications
     on first startup or during regular polling.
     """
@@ -55,8 +57,8 @@ def is_historical_assignment(assignment: dict, now: Optional[datetime] = None) -
     if isinstance(due_date, dict):
         from .deadline_scheduler import _parse_due_datetime
         due_dt = _parse_due_datetime(due_date, due_time)
-        if due_dt is not None:
-            return due_dt <= now
+        if due_dt is not None and due_dt <= now:
+            return True
 
     created_str = assignment.get("created") or assignment.get("creationTime")
     if created_str:
@@ -69,6 +71,108 @@ def is_historical_assignment(assignment: dict, now: Optional[datetime] = None) -
             pass
 
     return False
+
+
+class AssignmentClassification(str, Enum):
+    """Possible outcomes of evaluating an assignment against watcher state."""
+    NEW = "new"
+    DEADLINE_UPDATED = "deadline_updated"
+    HISTORICAL_BASELINE = "historical_baseline"
+    UNCHANGED = "unchanged"
+
+
+@dataclass
+class ClassifiedAssignment:
+    """Detailed decision resulting from classify_assignment."""
+    classification: AssignmentClassification
+    course_id: str
+    course_name: str
+    assignment_id: str
+    title: str
+    due_date: Optional[dict]
+    due_time: Optional[dict]
+    previous_due_date: Optional[dict] = None
+    previous_due_time: Optional[dict] = None
+    created: Optional[str] = None
+
+
+def classify_assignment(
+    assignment: dict,
+    course_id: str,
+    course_name: str,
+    state_store: StateStore,
+    user_id: str = DEFAULT_USER_ID,
+    filter_historical: bool = True,
+    now: Optional[datetime] = None,
+) -> Optional[ClassifiedAssignment]:
+    """
+    Classify an assignment against the current state store.
+    Shared notification decision logic between production AssignmentWatcher and simulation engine.
+    """
+    assignment_id = assignment.get("id")
+    if not assignment_id:
+        return None
+
+    title = assignment.get("title", "Untitled assignment")
+    due_date = assignment.get("due_date") or assignment.get("dueDate")
+    due_time = assignment.get("due_time") or assignment.get("dueTime")
+    created = assignment.get("created") or assignment.get("creationTime")
+
+    known = state_store.get_known_assignment(course_id, assignment_id, user_id=user_id)
+
+    if known is None:
+        if filter_historical and is_historical_assignment(assignment, now=now):
+            return ClassifiedAssignment(
+                classification=AssignmentClassification.HISTORICAL_BASELINE,
+                course_id=course_id,
+                course_name=course_name,
+                assignment_id=assignment_id,
+                title=title,
+                due_date=due_date,
+                due_time=due_time,
+                created=created,
+            )
+        return ClassifiedAssignment(
+            classification=AssignmentClassification.NEW,
+            course_id=course_id,
+            course_name=course_name,
+            assignment_id=assignment_id,
+            title=title,
+            due_date=due_date,
+            due_time=due_time,
+            created=created,
+        )
+
+    # Already known - check whether the deadline changed.
+    prev_due_date = json.loads(known["due_date_json"]) if known.get("due_date_json") else None
+    prev_due_time = json.loads(known["due_time_json"]) if known.get("due_time_json") else None
+
+    if prev_due_date != due_date or prev_due_time != due_time:
+        return ClassifiedAssignment(
+            classification=AssignmentClassification.DEADLINE_UPDATED,
+            course_id=course_id,
+            course_name=course_name,
+            assignment_id=assignment_id,
+            title=title,
+            due_date=due_date,
+            due_time=due_time,
+            previous_due_date=prev_due_date,
+            previous_due_time=prev_due_time,
+            created=created,
+        )
+
+    return ClassifiedAssignment(
+        classification=AssignmentClassification.UNCHANGED,
+        course_id=course_id,
+        course_name=course_name,
+        assignment_id=assignment_id,
+        title=title,
+        due_date=due_date,
+        due_time=due_time,
+        previous_due_date=prev_due_date,
+        previous_due_time=prev_due_time,
+        created=created,
+    )
 
 
 @dataclass
@@ -100,7 +204,8 @@ class AssignmentWatcher:
         on_event: Callable[[AssignmentEvent], None],
         credentials,
         user_id: str = DEFAULT_USER_ID,
-        filter_historical: bool = False,
+        filter_historical: bool = True,
+        now: Optional[datetime] = None,
     ):
         """
         Args:
@@ -113,12 +218,14 @@ class AssignmentWatcher:
                      `credentials`.
             filter_historical: if True, suppresses 'new' events for historical assignments
                                (e.g. past due dates) on first startup or subsequent polls.
+            now: reference datetime for historical checking (defaults to utcnow).
         """
         self._state = state_store
         self._on_event = on_event
         self._credentials = credentials
         self._user_id = user_id
         self._filter_historical = filter_historical
+        self._now = now
 
     def check_once(self) -> List[AssignmentEvent]:
         """
@@ -172,69 +279,85 @@ class AssignmentWatcher:
     def _process_assignment(
         self, course_id: str, course_name: str, assignment: dict
     ) -> Optional[AssignmentEvent]:
-        assignment_id = assignment.get("id")
-        title = assignment.get("title", "Untitled assignment")
-        due_date = assignment.get("due_date")
-        due_time = assignment.get("due_time")
-
-        if not assignment_id:
+        classified = classify_assignment(
+            assignment,
+            course_id=course_id,
+            course_name=course_name,
+            state_store=self._state,
+            user_id=self._user_id,
+            filter_historical=self._filter_historical,
+            now=self._now,
+        )
+        if classified is None:
             return None
 
-        known = self._state.get_known_assignment(course_id, assignment_id, user_id=self._user_id)
+        if classified.classification == AssignmentClassification.HISTORICAL_BASELINE:
+            self._state.record_new_assignment(
+                classified.course_id,
+                classified.assignment_id,
+                classified.title,
+                classified.due_date,
+                classified.due_time,
+                user_id=self._user_id,
+            )
+            logger.info("Historical assignment baseline recorded (no notification): %s (%s)", classified.title, course_name)
+            return None
 
-        if known is None:
-            # Check if this assignment is historical
-            if self._filter_historical and is_historical_assignment(assignment):
-                self._state.record_new_assignment(
-                    course_id, assignment_id, title, due_date, due_time, user_id=self._user_id,
-                )
-                logger.info("Historical assignment baseline recorded (no notification): %s (%s)", title, course_name)
-                return None
-
-            # Brand new assignment we've never recorded before
+        elif classified.classification == AssignmentClassification.NEW:
             won = self._state.record_new_assignment(
-                course_id, assignment_id, title, due_date, due_time, user_id=self._user_id,
+                classified.course_id,
+                classified.assignment_id,
+                classified.title,
+                classified.due_date,
+                classified.due_time,
+                user_id=self._user_id,
             )
             if not won:
                 # Another worker claimed it first
                 return None
-            logger.info("New assignment detected: %s (%s)", title, course_name)
+            logger.info("New assignment detected: %s (%s)", classified.title, course_name)
             return AssignmentEvent(
                 kind="new",
-                course_id=course_id,
-                course_name=course_name,
-                assignment_id=assignment_id,
-                title=title,
-                due_date=due_date,
-                due_time=due_time,
+                course_id=classified.course_id,
+                course_name=classified.course_name,
+                assignment_id=classified.assignment_id,
+                title=classified.title,
+                due_date=classified.due_date,
+                due_time=classified.due_time,
             )
 
-        # Already known - check whether the deadline changed.
-        prev_due_date = json.loads(known["due_date_json"]) if known["due_date_json"] else None
-        prev_due_time = json.loads(known["due_time_json"]) if known["due_time_json"] else None
+        elif classified.classification == AssignmentClassification.DEADLINE_UPDATED:
+            known = self._state.get_known_assignment(classified.course_id, classified.assignment_id, user_id=self._user_id)
+            old_due_date_json = known.get("due_date_json") if known else None
+            old_due_time_json = known.get("due_time_json") if known else None
 
-        if prev_due_date != due_date or prev_due_time != due_time:
             won = self._state.update_assignment_deadline(
-                course_id, assignment_id, title, due_date, due_time, 
-                old_due_date_json=known["due_date_json"], 
-                old_due_time_json=known["due_time_json"], 
+                classified.course_id,
+                classified.assignment_id,
+                classified.title,
+                classified.due_date,
+                classified.due_time,
+                old_due_date_json=old_due_date_json,
+                old_due_time_json=old_due_time_json,
                 user_id=self._user_id,
             )
             if not won:
                 # Another worker changed the deadline first
                 return None
-            logger.info("Deadline change detected: %s (%s)", title, course_name)
+            logger.info("Deadline change detected: %s (%s)", classified.title, course_name)
             return AssignmentEvent(
                 kind="deadline_updated",
-                course_id=course_id,
-                course_name=course_name,
-                assignment_id=assignment_id,
-                title=title,
-                due_date=due_date,
-                due_time=due_time,
-                previous_due_date=prev_due_date,
-                previous_due_time=prev_due_time,
+                course_id=classified.course_id,
+                course_name=classified.course_name,
+                assignment_id=classified.assignment_id,
+                title=classified.title,
+                due_date=classified.due_date,
+                due_time=classified.due_time,
+                previous_due_date=classified.previous_due_date,
+                previous_due_time=classified.previous_due_time,
             )
 
+        # UNCHANGED
         return None
+
 

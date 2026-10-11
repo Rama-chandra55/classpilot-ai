@@ -21,7 +21,11 @@ from .deadline_scheduler import _parse_due_datetime
 from .google_oauth import get_authorized_credentials
 from .state_store import ReadOnlyStateStore, StateStore
 from .user_store import UserStore
-from .watcher import is_historical_assignment
+from .watcher import (
+    AssignmentClassification,
+    classify_assignment,
+    is_historical_assignment,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -321,86 +325,86 @@ def run_watcher_simulation(
         result.total_assignments_evaluated += len(cw_items)
 
         for cw in cw_items:
-            a_id = str(cw.get("id"))
-            title = str(cw.get("title") or "Untitled assignment")
-            due_date = cw.get("dueDate") or cw.get("due_date")
-            due_time = cw.get("dueTime") or cw.get("due_time")
+            # Use shared event classification logic from watcher
+            classified = classify_assignment(
+                cw,
+                course_id=c_id,
+                course_name=c_name,
+                state_store=read_only_store,
+                user_id=target_user_id,
+                filter_historical=True,
+                now=now,
+            )
+            if not classified:
+                continue
 
             assignment_record = {
                 "course_id": c_id,
                 "course_name": c_name,
-                "assignment_id": a_id,
-                "title": title,
-                "due_date": due_date,
-                "due_time": due_time,
-                "created": cw.get("creationTime") or cw.get("created"),
+                "assignment_id": classified.assignment_id,
+                "title": classified.title,
+                "due_date": classified.due_date,
+                "due_time": classified.due_time,
+                "created": classified.created,
             }
             evaluated_coursework.append(assignment_record)
 
-            # Replicate production AssignmentWatcher._process_assignment logic
-            known = read_only_store.get_known_assignment(c_id, a_id, user_id=target_user_id)
-
-            if known is None:
-                # Brand new assignment check
-                if is_historical_assignment(assignment_record, now=now):
-                    # Initial baseline / historical assignment: suppressed
-                    result.suppressed_historical_assignments.append({
-                        "course_id": c_id,
-                        "course_name": c_name,
-                        "assignment_id": a_id,
-                        "title": title,
-                        "reason": "Historical assignment on initial baseline (deadline or creation in past)",
-                    })
-                    # Track in-memory so subsequent checks in this simulation recognize it
-                    read_only_store.record_new_assignment(
-                        c_id, a_id, title, due_date, due_time, user_id=target_user_id,
-                    )
-                else:
-                    # Genuine new assignment notification prediction
-                    predicted_subject = f"📚 New Assignment: {title}"
-                    result.detected_new_assignments.append({
-                        "course_id": c_id,
-                        "course_name": c_name,
-                        "assignment_id": a_id,
-                        "title": title,
-                        "due_date": due_date,
-                        "due_time": due_time,
-                        "predicted_subject": predicted_subject,
-                    })
-                    read_only_store.record_new_assignment(
-                        c_id, a_id, title, due_date, due_time, user_id=target_user_id,
-                    )
-            else:
-                # Already known assignment: check for deadline updates
-                prev_due_date = json.loads(known["due_date_json"]) if known.get("due_date_json") else None
-                prev_due_time = json.loads(known["due_time_json"]) if known.get("due_time_json") else None
-
-                if prev_due_date != due_date or prev_due_time != due_time:
-                    predicted_subject = f"⏳ Deadline Changed: {title}"
-                    result.detected_deadline_updates.append({
-                        "course_id": c_id,
-                        "course_name": c_name,
-                        "assignment_id": a_id,
-                        "title": title,
-                        "new_due_date": due_date,
-                        "new_due_time": due_time,
-                        "prev_due_date": prev_due_date,
-                        "prev_due_time": prev_due_time,
-                        "predicted_subject": predicted_subject,
-                    })
-                    read_only_store.update_assignment_deadline(
-                        c_id, a_id, title, due_date, due_time,
-                        known.get("due_date_json"), known.get("due_time_json"),
-                        user_id=target_user_id,
-                    )
-                else:
-                    # Unchanged existing assignment: suppressed by deduplication
-                    result.suppressed_existing_assignments.append({
-                        "course_id": c_id,
-                        "assignment_id": a_id,
-                        "title": title,
-                        "reason": "Already recorded in StateStore with same deadline",
-                    })
+            if classified.classification == AssignmentClassification.HISTORICAL_BASELINE:
+                # Initial baseline / historical assignment: suppressed
+                result.suppressed_historical_assignments.append({
+                    "course_id": c_id,
+                    "course_name": c_name,
+                    "assignment_id": classified.assignment_id,
+                    "title": classified.title,
+                    "reason": "Historical assignment on initial baseline (deadline or creation in past)",
+                })
+                # Track in-memory so subsequent checks in this simulation recognize it
+                read_only_store.record_new_assignment(
+                    c_id, classified.assignment_id, classified.title, classified.due_date, classified.due_time, user_id=target_user_id,
+                )
+            elif classified.classification == AssignmentClassification.NEW:
+                # Genuine new assignment notification prediction
+                predicted_subject = f"📚 New Assignment: {classified.title}"
+                result.detected_new_assignments.append({
+                    "course_id": c_id,
+                    "course_name": c_name,
+                    "assignment_id": classified.assignment_id,
+                    "title": classified.title,
+                    "due_date": classified.due_date,
+                    "due_time": classified.due_time,
+                    "predicted_subject": predicted_subject,
+                })
+                read_only_store.record_new_assignment(
+                    c_id, classified.assignment_id, classified.title, classified.due_date, classified.due_time, user_id=target_user_id,
+                )
+            elif classified.classification == AssignmentClassification.DEADLINE_UPDATED:
+                # Deadline update notification prediction
+                predicted_subject = f"⏳ Deadline Changed: {classified.title}"
+                result.detected_deadline_updates.append({
+                    "course_id": c_id,
+                    "course_name": c_name,
+                    "assignment_id": classified.assignment_id,
+                    "title": classified.title,
+                    "new_due_date": classified.due_date,
+                    "new_due_time": classified.due_time,
+                    "prev_due_date": classified.previous_due_date,
+                    "prev_due_time": classified.previous_due_time,
+                    "predicted_subject": predicted_subject,
+                })
+                read_only_store.update_assignment_deadline(
+                    c_id, classified.assignment_id, classified.title, classified.due_date, classified.due_time,
+                    json.dumps(classified.previous_due_date) if classified.previous_due_date else None,
+                    json.dumps(classified.previous_due_time) if classified.previous_due_time else None,
+                    user_id=target_user_id,
+                )
+            elif classified.classification == AssignmentClassification.UNCHANGED:
+                # Unchanged existing assignment: suppressed by deduplication
+                result.suppressed_existing_assignments.append({
+                    "course_id": c_id,
+                    "assignment_id": classified.assignment_id,
+                    "title": classified.title,
+                    "reason": "Already recorded in StateStore with same deadline",
+                })
 
     # 6. Evaluate Deadline Reminders (replicate production DeadlineScheduler logic)
     # Combine assignments seen during coursework fetch with all assignments in StateStore
