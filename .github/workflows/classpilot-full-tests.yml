@@ -37,7 +37,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install . pytest pytest-timeout
+          pip install . pytest pytest-timeout reportlab
 
       - name: Run production safeguards tests independently
         env:
@@ -71,7 +71,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install . pytest pytest-timeout
+          pip install . pytest pytest-timeout reportlab
 
       - name: Run isolated unit tests
         env:
@@ -123,7 +123,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install . pytest pytest-timeout
+          pip install . pytest pytest-timeout reportlab
 
       - name: Run integration tests
         env:

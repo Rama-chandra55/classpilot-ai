@@ -256,11 +256,16 @@ class TestExtractPptxVisuals(unittest.TestCase):
 # ── PDF ──────────────────────────────────────────────────────────────────────
 
 class TestExtractPdfVisuals(unittest.TestCase):
-    def _pdf_with_pages(self, build_fn) -> io.BytesIO:
+    @classmethod
+    def setUpClass(cls):
         try:
             from reportlab.pdfgen import canvas
+            from reportlab.lib.utils import ImageReader
         except ImportError:
-            self.skipTest("reportlab not available to build PDF fixtures")
+            raise unittest.SkipTest("reportlab not available to build PDF fixtures")
+
+    def _pdf_with_pages(self, build_fn) -> io.BytesIO:
+        from reportlab.pdfgen import canvas
         buf = io.BytesIO()
         c = canvas.Canvas(buf, pagesize=(600, 800))
         build_fn(c)
