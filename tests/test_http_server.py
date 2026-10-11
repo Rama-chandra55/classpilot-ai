@@ -229,8 +229,8 @@ class TestHttpServerWiring(unittest.TestCase):
         self.assertEqual(tools_before, tools_after,
                          "http_server.py must not register new tools")
 
-    def test_eight_tools_registered_in_total(self):
-        """Exactly 8 tools must be registered: 5 study + 3 watcher."""
+    def test_six_tools_registered_in_total(self):
+        """Exactly 6 tools must be registered: 5 study + 1 on-demand deadline."""
         import classpilot.server as srv
         expected = {
             # Study tools
@@ -239,10 +239,8 @@ class TestHttpServerWiring(unittest.TestCase):
             "list_materials",
             "get_material",
             "search_classroom",
-            # Watcher tools (kept)
+            # On-demand deadline queries
             "get_upcoming_deadlines",
-            "start_assignment_watcher",
-            "stop_assignment_watcher",
         }
         self.assertEqual(set(srv.mcp._tools.keys()), expected)
 

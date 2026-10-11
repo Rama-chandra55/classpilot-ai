@@ -1,35 +1,31 @@
 """
 ClassPilot AI — MCP Server
 
-Study Assistant + Classroom Watcher in one FastMCP server.
+Study Assistant + On-Demand Assignment & Deadline Tools in one FastMCP server.
 
-Study tools (NEW):
+Study tools:
     list_classes          — list all enrolled courses
     list_modules          — list topics/modules in a course
     list_materials        — list all materials in a module
     get_material          — retrieve and read a material's content
     search_classroom      — search across courses, modules, materials
 
-Watcher tools (kept):
-    get_upcoming_deadlines  — deadlines sorted by proximity
-    start_assignment_watcher — begin background polling + notifications
-    stop_assignment_watcher  — stop the watcher
+Assignment & Deadline tools:
+    get_upcoming_deadlines  — deadlines sorted by proximity (on-demand query)
+
+Note: Automatic email notifications and the background watcher (start_assignment_watcher,
+stop_assignment_watcher) have been decommissioned; Google Classroom provides native notifications.
 
 Transport: stdio (Claude Desktop, Cursor) or HTTP (classpilot/http_server.py)
 
-Phase 3 — every tool resolves its own caller identity and credentials:
-  Each of the 8 tools below starts by calling `_resolve_credentials()`,
-  which internally does `resolve_identity()` (classpilot/identity.py —
-  Phase 3: a configured dev user id; Phase 4: real per-request identity
-  from an authenticated MCP session, with no other change needed here)
+Per-request identity and credentials resolution:
+  Each of the 6 tools below starts by calling `_resolve_credentials()`,
+  which internally does `resolve_identity()` (classpilot/identity.py)
   followed by `get_authorized_credentials()` (classpilot/google_oauth.py
   — the user's own PostgreSQL-stored, encrypted Google credentials).
   `user_id` is never a tool parameter — it's resolved internally and
   never caller-controlled. If no credentials are on file (or a scope/
-  refresh failure occurs), the tool raises a clear error; it NEVER falls
-  back to the vendor's token.json-backed global singleton — that path
-  only exists for classpilot-ai's explicit standalone/legacy mode (see
-  main.py, services.build_services()), which this MCP server never calls.
+  refresh failure occurs), the tool raises a clear error.
 """
 
 import logging
@@ -43,8 +39,6 @@ from pydantic import BaseModel, Field
 from .identity import resolve_identity, RequestIdentity, IdentityResolutionError
 from .google_oauth import get_authorized_credentials, GoogleOAuthError
 from .user_store import UserStore
-from .services import AppServices, build_user_services
-from .deadline_scheduler import _parse_due_datetime
 from .study_client import (
     fetch_courses,
     fetch_topics,
@@ -53,6 +47,7 @@ from .study_client import (
     fetch_announcements,
     read_drive_file,
     search_all,
+    _parse_due_datetime,
 )
 
 logger = logging.getLogger(__name__)
@@ -156,26 +151,6 @@ def _resolve_credentials():
     return identity, credentials
 
 
-# ── Per-user watcher services (Phase 3: no process-global singleton) ──────────
-# Keyed by user_id so one identified user can never start, stop, or
-# otherwise affect another user's watcher/scheduler — see services.py's
-# AppServices, which now belongs to exactly one user.
-_user_services: Dict[str, AppServices] = {}
-
-
-def _get_user_services(identity: RequestIdentity, credentials) -> AppServices:
-    """Look up (or lazily build) THIS identity's own AppServices instance."""
-    existing = _user_services.get(identity.user_id)
-    if existing is not None:
-        return existing
-
-    user = UserStore().get_user_by_id(identity.user_id)
-    to_email = user.email if user else None
-    services = build_user_services(identity.user_id, credentials, to_email=to_email)
-    _user_services[identity.user_id] = services
-    return services
-
-
 # ── Pydantic output models ────────────────────────────────────────────────────
 
 class CourseInfo(BaseModel):
@@ -266,11 +241,6 @@ class DeadlineInfo(BaseModel):
     minutes_remaining: int
     hours_remaining: float
     state: str
-
-
-class WatcherResult(BaseModel):
-    running: bool
-    message: str
 
 
 # ── Helper: format due date ───────────────────────────────────────────────────
@@ -557,7 +527,7 @@ def search_classroom(query: str) -> List[SearchResult]:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# WATCHER TOOLS (kept from original — still fully working)
+# ASSIGNMENT & DEADLINE TOOLS (on-demand query)
 # ══════════════════════════════════════════════════════════════════════════════
 
 @mcp.tool()
@@ -611,39 +581,6 @@ def get_upcoming_deadlines(within_hours: int = 168) -> List[DeadlineInfo]:
 
     deadlines.sort(key=lambda x: x.minutes_remaining)
     return deadlines
-
-
-@mcp.tool()
-def start_assignment_watcher() -> WatcherResult:
-    """
-    Start the background assignment watcher.
-
-    When running, ClassPilot polls Classroom every 15 minutes (configurable)
-    and sends AI-generated email notifications for new assignments and
-    deadline reminders at 1 day / 6 hours / 1 hour / 15 minutes before each due date.
-    """
-    identity, credentials = _resolve_credentials()
-    svc = _get_user_services(identity, credentials)
-    if svc.is_watcher_running:
-        return WatcherResult(running=True, message="Watcher is already running.")
-    svc.enable_watcher()
-    return WatcherResult(
-        running=True,
-        message=(
-            f"✅ Assignment watcher enabled. It will run automatically in the background."
-        ),
-    )
-
-
-@mcp.tool()
-def stop_assignment_watcher() -> WatcherResult:
-    """Stop the background assignment watcher and all pending reminder jobs."""
-    identity, credentials = _resolve_credentials()
-    svc = _get_user_services(identity, credentials)
-    if not svc.is_watcher_running:
-        return WatcherResult(running=False, message="Watcher was not running.")
-    svc.disable_watcher()
-    return WatcherResult(running=False, message="⏹ Assignment watcher disabled.")
 
 
 # ── Entrypoint ────────────────────────────────────────────────────────────────

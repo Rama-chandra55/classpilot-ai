@@ -127,11 +127,12 @@ in a single API response page are not silently truncated.
 
 ## Project status
 
-- **Study Assistant (5 tools):** working — this is the actively developed part of the project.
+- **Study Assistant (5 tools):** `list_classes`, `list_modules`, `list_materials`, `get_material`, `search_classroom` — actively developed core tools.
+- **On-Demand Deadlines (1 tool):** `get_upcoming_deadlines` — queries and returns deadlines sorted by proximity on demand.
+- **Decommissioned Watcher & Automatic Email Notifications:** The background watcher tools (`start_assignment_watcher`, `stop_assignment_watcher`) and automatic email notification infrastructure were decommissioned since Google Classroom natively handles student notifications.
 - **PDF / DOCX / PPTX text extraction:** working, tested.
 - **Visual content (diagrams/charts/images):** working, tested — see "Visual content" above for what's covered and current limitations.
 - **Pagination:** working across all Classroom list reads.
-- **Assignment Watcher (3 tools):** working, carried over unmodified in behavior from the original project.
 - **Assignment submission:** intentionally removed from the MCP surface. The underlying vendor Classroom API code and `classpilot/submission_flow.py` still exist in the repo (and are still covered by tests) but are **not** registered as MCP tools in `classpilot/server.py`, and there are no plans to re-expose them.
 - **Multi-user persistence foundation (Phase 1 of the multi-user roadmap):** working, tested — Postgres-backed `users` + encrypted Google-credential storage exist and are covered by real integration tests, but are **not yet wired into the live auth flow**. The app still runs single-user via `token.json` today; see "Multi-user roadmap" below.
 
@@ -468,16 +469,12 @@ classpilot/
   oauth_web.py              Standalone Starlette app (classpilot-ai-oauth) — login/callback
                           routes; NOT part of the MCP transport, not reachable from any
                           MCP client (Phase 2)
-  submission_flow.py      Two-step submission flow (attach → confirm → turn in) — kept for the
-                          watcher's internal use in tests; NOT exposed as an MCP tool
-  watcher.py, deadline_scheduler.py, scheduler.py, state_store.py
-                          Background polling, deduplication, and deadline-reminder scheduling
-                          (state_store.py: SQLite, now with a schema-ready but not-yet-wired
-                          user_id column/param — see "Multi-user roadmap" above)
-  notification_service.py, notifier/
-                          LLM-generated notification text + delivery (email today)
+  submission_flow.py      Two-step submission flow (attach → confirm → turn in) — kept for tests;
+                          NOT exposed as an MCP tool
+  state_store.py          Postgres-backed deduplication state store
+  study_client.py         Per-user Google Classroom/Drive API client functions (courses,
+                          topics, materials, assignments, deadlines, visual extraction)
   llm/                    Pluggable LLM providers (Gemini, Groq, Anthropic)
-  main.py                 Standalone watcher entrypoint (no MCP, just polling + notifications)
 
 vendor_classroom_suite_mcp/
                           Vendored, unmodified third-party Classroom/Drive/Docs client.

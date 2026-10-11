@@ -33,7 +33,6 @@ dependencies = [
 ]
 
 [project.scripts]
-classpilot-ai     = "classpilot.main:main"
 classpilot-ai-mcp  = "classpilot.server:main"
 classpilot-ai-http = "classpilot.http_server:main"
 classpilot-ai-oauth = "classpilot.oauth_web:main"

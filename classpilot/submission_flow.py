@@ -22,11 +22,10 @@ resolves to "DBMS Final Project" even with slight wording differences.
 import logging
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from .classroom_client import classroom, drive
 from .events import EventType
-from .notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +79,7 @@ class SubmissionFlow:
     so the caller never has to remember to do it.
     """
 
-    def __init__(self, notification_service: NotificationService = None):
+    def __init__(self, notification_service: Optional[Any] = None):
         self._notification_service = notification_service
 
     # ── Feature 4: find assignment ────────────────────────────────────────────

@@ -253,7 +253,6 @@ class TestToolExecutionIsolation(_PostgresTestCase):
         for tool_name in (
             "list_classes", "list_modules", "list_materials", "get_material",
             "search_classroom", "get_upcoming_deadlines",
-            "start_assignment_watcher", "stop_assignment_watcher",
         ):
             fn = getattr(srv, tool_name)
             params = set(inspect.signature(fn).parameters)
@@ -346,110 +345,63 @@ class TestStateStoreIsolation(_PostgresTestCase):
         self.assertEqual(self.store.get_known_assignment("c1", "a1", user_id=userB)["title"], "B v1")
 
 
-# ── Watcher isolation ────────────────────────────────────────────────────────
+# ── Upcoming deadlines isolation ─────────────────────────────────────────────
 
-class TestWatcherIsolation(_PostgresTestCase):
-    def test_starting_user_a_watcher_does_not_create_or_affect_user_bs_watcher(self):
+class TestUpcomingDeadlinesIsolation(_PostgresTestCase):
+    def test_get_upcoming_deadlines_uses_the_resolved_users_credentials(self):
         import classpilot.server as srv
         store, user_a, user_b = self._make_two_users()
-        srv._user_services.clear()
-        self.addCleanup(srv._user_services.clear)
 
-        with patch("classpilot.services.create_llm_provider", return_value=MagicMock()), \
-             patch("classpilot.services.create_notifier", return_value=MagicMock()):
+        courses_a = [{"id": "ca1", "name": "Course A"}]
+        courses_b = [{"id": "cb1", "name": "Course B"}]
+        assignments_a = [{
+            "id": "a1", "title": "Homework 1",
+            "due_date": {"year": 2028, "month": 1, "day": 1},
+            "due_time": {"hours": 10, "minutes": 0},
+        }]
+        assignments_b = [{
+            "id": "b1", "title": "Homework 2",
+            "due_date": {"year": 2028, "month": 2, "day": 1},
+            "due_time": {"hours": 12, "minutes": 0},
+        }]
 
+        captured = []
+
+        def fake_fetch_courses(credentials):
+            captured.append(("courses", credentials))
+            if credentials == "creds-A":
+                return courses_a
+            return courses_b
+
+        def fake_fetch_assignments(credentials, course_id):
+            captured.append(("assignments", credentials, course_id))
+            if credentials == "creds-A":
+                return assignments_a
+            return assignments_b
+
+        with patch.object(srv, "fetch_courses", side_effect=fake_fetch_courses), \
+             patch.object(srv, "fetch_assignments", side_effect=fake_fetch_assignments):
             with patch.object(srv, "_resolve_credentials", return_value=(
                 MagicMock(user_id=user_a.id), "creds-A",
             )):
-                srv.start_assignment_watcher()
-
-        self.assertIn(user_a.id, srv._user_services)
-        self.assertNotIn(user_b.id, srv._user_services)
-        self.assertTrue(srv._user_services[user_a.id].is_watcher_running)
-
-    def test_user_b_cannot_stop_user_as_watcher(self):
-        """The core requirement: stop_assignment_watcher only ever
-        resolves and acts on the CALLER's own AppServices entry — there
-        is no way to address another user's watcher because user_id is
-        never a parameter (see TestToolExecutionIsolation) and the lookup
-        key always comes from _resolve_credentials()."""
-        import classpilot.server as srv
-        store, user_a, user_b = self._make_two_users()
-        srv._user_services.clear()
-        self.addCleanup(srv._user_services.clear)
-
-        with patch("classpilot.services.create_llm_provider", return_value=MagicMock()), \
-             patch("classpilot.services.create_notifier", return_value=MagicMock()):
-            with patch.object(srv, "_resolve_credentials", return_value=(
-                MagicMock(user_id=user_a.id), "creds-A",
-            )):
-                srv.start_assignment_watcher()
-
-            # User B calls stop_assignment_watcher — resolves to B's OWN
-            # (nonexistent-yet) entry, never touches A's. Still inside the
-            # AppServices-construction patches, since resolving B's own
-            # entry for the first time also builds a fresh AppServices.
+                deadlines_a = srv.get_upcoming_deadlines(within_hours=0)
             with patch.object(srv, "_resolve_credentials", return_value=(
                 MagicMock(user_id=user_b.id), "creds-B",
             )):
-                result = srv.stop_assignment_watcher()
+                deadlines_b = srv.get_upcoming_deadlines(within_hours=0)
 
-        self.assertFalse(result.running)  # B never had one running
-        self.assertTrue(srv._user_services[user_a.id].is_watcher_running)  # A's untouched
+        self.assertEqual(len(deadlines_a), 1)
+        self.assertEqual(deadlines_a[0].title, "Homework 1")
+        self.assertEqual(deadlines_a[0].course_name, "Course A")
 
-    def test_watcher_polls_classroom_with_its_owners_credentials(self):
-        import classpilot.server as srv
-        store, user_a, user_b = self._make_two_users()
-        srv._user_services.clear()
-        self.addCleanup(srv._user_services.clear)
+        self.assertEqual(len(deadlines_b), 1)
+        self.assertEqual(deadlines_b[0].title, "Homework 2")
+        self.assertEqual(deadlines_b[0].course_name, "Course B")
 
-        with patch("classpilot.services.create_llm_provider", return_value=MagicMock()), \
-             patch("classpilot.services.create_notifier", return_value=MagicMock()), \
-             patch.object(srv, "_resolve_credentials", return_value=(
-                MagicMock(user_id=user_a.id), "creds-A-object",
-            )):
-            identity, credentials = srv._resolve_credentials()
-            services = srv._get_user_services(identity, credentials)
-
-        self.assertEqual(services.watcher._credentials, "creds-A-object")
-        self.assertEqual(services.watcher._user_id, user_a.id)
-
-
-# ── Cache isolation ──────────────────────────────────────────────────────────
-
-class TestCacheIsolation(_PostgresTestCase):
-    def test_user_services_dict_has_independent_entries_per_user(self):
-        import classpilot.server as srv
-        store, user_a, user_b = self._make_two_users()
-        srv._user_services.clear()
-        self.addCleanup(srv._user_services.clear)
-
-        identity_a = MagicMock(user_id=user_a.id)
-        identity_b = MagicMock(user_id=user_b.id)
-
-        with patch("classpilot.services.create_llm_provider", return_value=MagicMock()), \
-             patch("classpilot.services.create_notifier", return_value=MagicMock()):
-            services_a = srv._get_user_services(identity_a, "creds-A")
-            services_b = srv._get_user_services(identity_b, "creds-B")
-
-        self.assertIsNot(services_a, services_b)
-        self.assertEqual(services_a.user_id, user_a.id)
-        self.assertEqual(services_b.user_id, user_b.id)
-        self.assertEqual(services_a.credentials, "creds-A")
-        self.assertEqual(services_b.credentials, "creds-B")
-
-    def test_looking_up_the_same_user_twice_returns_the_same_instance(self):
-        import classpilot.server as srv
-        store, user_a, _user_b = self._make_two_users()
-        srv._user_services.clear()
-        self.addCleanup(srv._user_services.clear)
-
-        identity_a = MagicMock(user_id=user_a.id)
-        with patch("classpilot.services.create_llm_provider", return_value=MagicMock()), \
-             patch("classpilot.services.create_notifier", return_value=MagicMock()):
-            first = srv._get_user_services(identity_a, "creds-A")
-            second = srv._get_user_services(identity_a, "creds-A")
-        self.assertIs(first, second)
+        self.assertIn(("courses", "creds-A"), captured)
+        self.assertIn(("assignments", "creds-A", "ca1"), captured)
+        self.assertIn(("courses", "creds-B"), captured)
+        self.assertIn(("assignments", "creds-B", "cb1"), captured)
 
 
 # ── Concurrent identity isolation ───────────────────────────────────────────

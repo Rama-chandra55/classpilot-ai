@@ -2,59 +2,16 @@ name: ClassPilot Full Test Suite
 
 on:
   workflow_dispatch:
-    inputs:
-      test_scope:
-        description: 'Test scope to execute'
-        required: false
-        default: 'all'
-        type: choice
-        options:
-          - all
-          - safeguards_only
 
 concurrency:
   group: classpilot-full-tests
   cancel-in-progress: false
 
 jobs:
-  production-safeguards:
-    name: Production Safeguards (Focused)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    permissions:
-      contents: read
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Setup Python 3.11
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install . pytest pytest-timeout reportlab
-
-      - name: Run production safeguards tests independently
-        env:
-          PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
-          PYTHONPATH: vendor_classroom_suite_mcp/src
-        run: |
-          python -m pytest \
-            tests/test_production_safeguards.py \
-            tests/test_production_watcher_hardening.py \
-            -v --tb=short -p pytest_timeout --timeout=30 --timeout-method=thread -o faulthandler_timeout=30
-
   unit-tests:
     name: Isolated Unit Suite
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    needs: production-safeguards
-    if: "${{ github.event.inputs.test_scope != 'safeguards_only' }}"
     permissions:
       contents: read
 
@@ -83,20 +40,13 @@ jobs:
             tests/test_credential_failure_modes.py \
             tests/test_cross_file_isolation.py \
             tests/test_crypto.py \
-            tests/test_feature2.py \
-            tests/test_feature3.py \
             tests/test_feature4_5.py \
-            tests/test_feature6.py \
             tests/test_gemini_provider.py \
             tests/test_get_material_visuals.py \
             tests/test_google_oauth.py \
             tests/test_identity.py \
-            tests/test_job_script.py \
             tests/test_prod_config.py \
-            tests/test_production_safeguards.py \
-            tests/test_production_watcher_hardening.py \
             tests/test_scope_audit.py \
-            tests/test_simulation.py \
             tests/test_study_tools.py \
             tests/test_visual_extractor.py \
             -v --tb=short -p pytest_timeout --timeout=30 --timeout-method=thread -o faulthandler_timeout=30
@@ -106,7 +56,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     needs: unit-tests
-    if: "${{ github.event.inputs.test_scope != 'safeguards_only' }}"
     permissions:
       contents: read
 
@@ -132,7 +81,6 @@ jobs:
         run: |
           python -m pytest \
             tests/test_http_server.py \
-            tests/test_job_concurrency.py \
             tests/test_mcp_auth.py \
             tests/test_mcp_oauth_web.py \
             tests/test_multiuser_isolation.py \

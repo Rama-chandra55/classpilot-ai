@@ -46,6 +46,7 @@ Phase 3 — explicit per-user credentials, never the global singleton:
 
 import io
 import logging
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from .visual_extractor import (
@@ -736,3 +737,26 @@ def search_all(credentials, query: str) -> list[dict[str, Any]]:
                     })
 
     return results
+ 
+ 
+def _parse_due_datetime(due_date: dict | None, due_time: dict | None) -> datetime | None:
+    """Convert Classroom API due_date + due_time dicts into a UTC datetime.
+    
+    Returns None if either component is missing (no deadline set).
+    """
+    if not due_date:
+        return None
+    try:
+        year   = due_date["year"]
+        month  = due_date["month"]
+        day    = due_date["day"]
+        hour   = (due_time or {}).get("hours", 23)
+        minute = (due_time or {}).get("minutes", 59)
+        second = (due_time or {}).get("seconds", 0)
+        return datetime(year, month, day, hour, minute, second, tzinfo=timezone.utc)
+    except (KeyError, ValueError, TypeError) as exc:
+        logger.warning("Could not parse due datetime: %s", exc)
+        return None
+
+
+parse_due_datetime = _parse_due_datetime
