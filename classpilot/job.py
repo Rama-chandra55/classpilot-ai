@@ -34,29 +34,29 @@ def run_diagnostics(user_id: str, credentials, config) -> None:
     # 1. Verify Classroom assignment fetching
     logger.info("1. Verifying Google Classroom connectivity...")
     try:
-        from classpilot.classroom_client import classroom
-        client = classroom(credentials)
+        from googleapiclient.discovery import build
+        client = build("classroom", "v1", credentials=credentials)
         courses = client.courses().list(pageSize=1).execute()
         logger.info("   [PASS] Successfully fetched %d course(s)", len(courses.get('courses', [])))
     except Exception as exc:
         logger.error("   [FAIL] Classroom fetch failed: %s", exc)
 
     # 2. Verify Groq (LLM) configuration
-    logger.info("2. Verifying LLM (%s) configuration...", config.llm_backend)
     try:
+        logger.info("2. Verifying LLM (%s) configuration...", config.llm_provider)
         from classpilot.llm import create_llm_provider
         from classpilot.events import EventType
         llm = create_llm_provider(config)
         response = llm.generate_message(EventType.NEW_ASSIGNMENT, "Diagnostic Test Assignment")
         if not response:
             raise ValueError("LLM returned empty response")
-        logger.info("   [PASS] Successfully generated text using %s", config.llm_backend)
+        logger.info("   [PASS] Successfully generated text using %s", config.llm_provider)
     except Exception as exc:
         logger.error("   [FAIL] LLM verification failed: %s", exc)
 
     # 3. Verify SMTP configuration
-    logger.info("3. Verifying SMTP configuration...")
     try:
+        logger.info("3. Verifying SMTP configuration...")
         if config.notifier_backend.lower() == "email":
             import smtplib
             with smtplib.SMTP(config.smtp_host, config.smtp_port, timeout=15) as server:
