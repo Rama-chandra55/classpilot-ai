@@ -23,9 +23,11 @@ No token value (access or refresh) is ever included in any HTTP response
 this app sends — every response is a plain, generic status page.
 """
 
-from __future__ import annotations
-
+import asyncio
+import contextlib
 import logging
+import threading
+import time
 
 from starlette.applications import Starlette
 from starlette.requests import Request
@@ -39,6 +41,19 @@ from .oauth_state import generate_state, register_state, consume_state
 from .user_store import UserStore
 
 logger = logging.getLogger(__name__)
+
+
+class _InflightCallback:
+    def __init__(self):
+        self.event = threading.Event()
+        self.response: HTMLResponse | RedirectResponse | None = None
+
+
+# Thread-safe in-flight request coalescing: holds active callback only while
+# complete_authorization is executing over the network, resolving the browser
+# prefetch/double-click race condition without any post-completion replay cache.
+_inflight_callbacks: dict[tuple[str, str], _InflightCallback] = {}
+_inflight_lock = threading.Lock()
 
 
 def _html_page(title: str, message: str, ok: bool = True) -> HTMLResponse:
@@ -66,7 +81,7 @@ async def google_login(request: Request) -> RedirectResponse:
     return RedirectResponse(auth_url)
 
 
-async def google_callback(request: Request) -> HTMLResponse:
+async def google_callback(request: Request) -> HTMLResponse | RedirectResponse:
     """
     Handle Google's redirect back. Validates state (CSRF), then either:
       - the student denied consent (Google sends `error=...`)
@@ -87,8 +102,7 @@ async def google_callback(request: Request) -> HTMLResponse:
         )
 
     state = request.query_params.get("state")
-    code_verifier, mcp_context = consume_state(state)
-    if code_verifier is None:
+    if not state:
         return _html_page(
             "Sign-in link expired or invalid",
             "This sign-in link is no longer valid — it may have already been "
@@ -104,59 +118,112 @@ async def google_callback(request: Request) -> HTMLResponse:
             ok=False,
         )
 
+    callback_key = (state, code)
+
+    with _inflight_lock:
+        inflight = _inflight_callbacks.get(callback_key)
+        if inflight is None:
+            inflight = _InflightCallback()
+            _inflight_callbacks[callback_key] = inflight
+            is_initiator = True
+        else:
+            is_initiator = False
+
+    # If an identical callback request is actively in-flight in this process
+    # (e.g. concurrent browser prefetch, speculative prerender, or rapid double-click),
+    # await the in-flight result rather than failing single-use validation.
+    # Note: No post-completion cache is kept. Once finished, any subsequent request
+    # is strictly single-use and rejected with HTTP 400.
+    if not is_initiator:
+        logger.info("Diagnostic: Awaiting in-flight callback for duplicate request on state %s", state[:8])
+        finished = await asyncio.to_thread(inflight.event.wait, 15.0)
+        if finished and inflight.response is not None:
+            return inflight.response
+        return _html_page(
+            "Sign-in failed",
+            "Sign-in attempt timed out or failed. Please try again.",
+            ok=False,
+        )
+
     try:
-        user = complete_authorization(code, code_verifier, UserStore())
-    except GoogleOAuthError as exc:
-        logger.error("OAuth callback failed: %s", exc)
-        return _html_page(
-            "Sign-in failed",
-            "Something went wrong connecting your Google account. "
-            "Please try again, or contact support if this keeps happening.",
-            ok=False,
-        )
-    except Exception:
-        # Anything genuinely unexpected (not a GoogleOAuthError) must still
-        # degrade to a clean, generic page — never a raw stack trace or
-        # exception message exposed to the student's browser. The real
-        # exception is logged server-side (with traceback) for debugging.
-        logger.exception("Unexpected error in OAuth callback")
-        return _html_page(
-            "Sign-in failed",
-            "Something unexpected went wrong. Please try again, or contact "
-            "support if this keeps happening.",
-            ok=False,
-        )
-
-    if mcp_context:
-        import secrets
-        from .db import get_connection
-        from .mcp_auth import DEFAULT_MCP_SCOPES
-        
-        mcp_code = secrets.token_urlsafe(32)
-        with get_connection() as conn:
-            conn.execute(
-                "INSERT INTO mcp_auth_codes "
-                "(code, user_id, client_id, redirect_uri, code_challenge, "
-                " code_challenge_method, scopes, resource) "
-                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                (mcp_code, user.id, mcp_context["client_id"], mcp_context["redirect_uri"],
-                 mcp_context["code_challenge"], mcp_context["code_challenge_method"],
-                 list(DEFAULT_MCP_SCOPES), mcp_context["resource"]),
+        code_verifier, mcp_context = consume_state(state)
+        if code_verifier is None:
+            resp = _html_page(
+                "Sign-in link expired or invalid",
+                "This sign-in link is no longer valid — it may have already been "
+                "used, or taken too long to complete. Please start again.",
+                ok=False,
             )
-            
-        redirect_uri = mcp_context["redirect_uri"]
-        sep = "&" if "?" in redirect_uri else "?"
-        location = f"{redirect_uri}{sep}code={mcp_code}"
-        if mcp_context["state"]:
-            location += f"&state={mcp_context['state']}"
-        return RedirectResponse(location, status_code=302)
+            inflight.response = resp
+            inflight.event.set()
+            return resp
 
-    display = user.email or user.display_name or "your Google account"
-    return _html_page(
-        "Connected!",
-        f"ClassPilot is now connected to {display}. You can close this window.",
-        ok=True,
-    )
+        try:
+            user = complete_authorization(code, code_verifier, UserStore())
+        except GoogleOAuthError as exc:
+            logger.error("OAuth callback failed: %s", exc)
+            resp = _html_page(
+                "Sign-in failed",
+                "Something went wrong connecting your Google account. "
+                "Please try again, or contact support if this keeps happening.",
+                ok=False,
+            )
+            inflight.response = resp
+            inflight.event.set()
+            return resp
+        except Exception:
+            # Anything genuinely unexpected (not a GoogleOAuthError) must still
+            # degrade to a clean, generic page — never a raw stack trace or
+            # exception message exposed to the student's browser. The real
+            # exception is logged server-side (with traceback) for debugging.
+            logger.exception("Unexpected error in OAuth callback")
+            resp = _html_page(
+                "Sign-in failed",
+                "Something unexpected went wrong. Please try again, or contact "
+                "support if this keeps happening.",
+                ok=False,
+            )
+            inflight.response = resp
+            inflight.event.set()
+            return resp
+
+        if mcp_context:
+            import secrets
+            from .db import get_connection
+            from .mcp_auth import DEFAULT_MCP_SCOPES
+            
+            mcp_code = secrets.token_urlsafe(32)
+            with get_connection() as conn:
+                conn.execute(
+                    "INSERT INTO mcp_auth_codes "
+                    "(code, user_id, client_id, redirect_uri, code_challenge, "
+                    " code_challenge_method, scopes, resource) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                    (mcp_code, user.id, mcp_context["client_id"], mcp_context["redirect_uri"],
+                     mcp_context["code_challenge"], mcp_context["code_challenge_method"],
+                     list(DEFAULT_MCP_SCOPES), mcp_context["resource"]),
+                )
+                
+            redirect_uri = mcp_context["redirect_uri"]
+            sep = "&" if "?" in redirect_uri else "?"
+            location = f"{redirect_uri}{sep}code={mcp_code}"
+            if mcp_context["state"]:
+                location += f"&state={mcp_context['state']}"
+            resp = RedirectResponse(location, status_code=302)
+        else:
+            display = user.email or user.display_name or "your Google account"
+            resp = _html_page(
+                "Connected!",
+                f"ClassPilot is now connected to {display}. You can close this window.",
+                ok=True,
+            )
+
+        inflight.response = resp
+        inflight.event.set()
+        return resp
+    finally:
+        with _inflight_lock:
+            _inflight_callbacks.pop(callback_key, None)
 
 
 # The Google-facing routes above, plus the MCP-facing OAuth 2.1 routes
@@ -173,7 +240,12 @@ routes = [
     *_mcp_oauth_routes,
 ]
 
-app = Starlette(routes=routes)
+@contextlib.asynccontextmanager
+async def lifespan(app):
+    init_schema()
+    yield
+
+app = Starlette(routes=routes, lifespan=lifespan)
 
 
 def main() -> None:

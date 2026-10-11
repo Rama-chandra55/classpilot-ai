@@ -43,7 +43,7 @@ from .db import get_connection
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_STATE_TTL_SECONDS = 600  # 10 minutes — generous for a human to complete consent
+DEFAULT_STATE_TTL_SECONDS = 1800  # 30 minutes — generous for human consent, 2FA, and account selection
 
 
 def generate_state() -> str:
@@ -82,11 +82,33 @@ def register_state(
     for attempt in range(2):
         try:
             with get_connection() as conn:
-                conn.execute(
-                    "INSERT INTO oauth_states (state, code_verifier, mcp_client_id, mcp_redirect_uri, mcp_code_challenge, mcp_code_challenge_method, mcp_state, mcp_resource) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                    (state, code_verifier, mcp_client_id, mcp_redirect_uri, mcp_code_challenge, mcp_code_challenge_method, mcp_state, mcp_resource),
-                )
+                if mcp_client_id is None:
+                    # Pure Google web login: insert base columns only. Backward-compatible
+                    # with both legacy 3-column and Phase 4/5 9-column oauth_states schemas.
+                    conn.execute(
+                        "INSERT INTO oauth_states (state, code_verifier) VALUES (%s, %s)",
+                        (state, code_verifier),
+                    )
+                else:
+                    try:
+                        conn.execute(
+                            "INSERT INTO oauth_states (state, code_verifier, mcp_client_id, mcp_redirect_uri, "
+                            "mcp_code_challenge, mcp_code_challenge_method, mcp_state, mcp_resource) "
+                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                            (state, code_verifier, mcp_client_id, mcp_redirect_uri,
+                             mcp_code_challenge, mcp_code_challenge_method, mcp_state, mcp_resource),
+                        )
+                    except psycopg.errors.UndefinedColumn:
+                        # Auto-migrate missing MCP columns on the fly if running against an unmigrated DB
+                        from .db import _migrate_add_mcp_columns
+                        _migrate_add_mcp_columns(conn)
+                        conn.execute(
+                            "INSERT INTO oauth_states (state, code_verifier, mcp_client_id, mcp_redirect_uri, "
+                            "mcp_code_challenge, mcp_code_challenge_method, mcp_state, mcp_resource) "
+                            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                            (state, code_verifier, mcp_client_id, mcp_redirect_uri,
+                             mcp_code_challenge, mcp_code_challenge_method, mcp_state, mcp_resource),
+                        )
             break
         except psycopg.OperationalError:
             if attempt == 0:
@@ -116,17 +138,31 @@ def consume_state(state: str, ttl_seconds: int = DEFAULT_STATE_TTL_SECONDS) -> t
     (there is no code_verifier to use).
     """
     import hashlib
+    import psycopg
     if not state:
         logger.warning("Diagnostic: Rejected OAuth callback — state token missing from request entirely.")
         return None, None
         
     state_hash = hashlib.sha256(state.encode("ascii")).hexdigest()[:8]
 
-    with get_connection() as conn:
-        row = conn.execute(
-            "DELETE FROM oauth_states WHERE state = %s RETURNING created_at, code_verifier, mcp_client_id, mcp_redirect_uri, mcp_code_challenge, mcp_code_challenge_method, mcp_state, mcp_resource",
-            (state,),
-        ).fetchone()
+    row = None
+    try:
+        with get_connection() as conn:
+            row = conn.execute(
+                "DELETE FROM oauth_states WHERE state = %s "
+                "RETURNING created_at, code_verifier, mcp_client_id, mcp_redirect_uri, "
+                "mcp_code_challenge, mcp_code_challenge_method, mcp_state, mcp_resource",
+                (state,),
+            ).fetchone()
+    except psycopg.errors.UndefinedColumn:
+        # Schema does not yet have MCP columns; fall back to base columns cleanly
+        with get_connection() as conn:
+            base_row = conn.execute(
+                "DELETE FROM oauth_states WHERE state = %s RETURNING created_at, code_verifier",
+                (state,),
+            ).fetchone()
+            if base_row is not None:
+                row = (base_row[0], base_row[1], None, None, None, None, None, None)
 
     if row is None:
         if state_hash in _recent_consumptions:

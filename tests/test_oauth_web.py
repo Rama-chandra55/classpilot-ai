@@ -18,6 +18,7 @@ nothing here is reachable from an MCP client at all).
 
 import os
 import sys
+import time
 import unittest
 from unittest.mock import patch
 
@@ -180,6 +181,75 @@ class TestGoogleCallbackSuccess(_OAuthWebTestCase):
             second = self.client.get(f"/auth/google/callback?code=code-2&state={state}")
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 400)
+
+    def test_concurrent_callbacks_coalesce_single_token_exchange(self):
+        """Browser prefetch or duplicate GET requests arriving concurrently while
+        complete_authorization is in-flight must coalesce: exactly ONE token
+        exchange occurs, and both requests receive the successful Connected page."""
+        import concurrent.futures
+        state = self._fresh_state()
+        fake_user = type("U", (), {"email": "carol@school.edu", "display_name": "Carol"})()
+        call_count = 0
+
+        def _slow_complete(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            time.sleep(0.15)  # simulate network round-trip to Google token endpoint
+            return fake_user
+
+        with patch.object(self.oauth_web_mod, "complete_authorization", side_effect=_slow_complete):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+                f1 = executor.submit(self.client.get, f"/auth/google/callback?code=code-shared&state={state}")
+                time.sleep(0.02)  # stagger so Request 1 registers the in-flight future
+                f2 = executor.submit(self.client.get, f"/auth/google/callback?code=code-shared&state={state}")
+                resp1 = f1.result()
+                resp2 = f2.result()
+
+        self.assertEqual(resp1.status_code, 200)
+        self.assertIn("Connected", resp1.text)
+        self.assertEqual(resp2.status_code, 200)
+        self.assertIn("Connected", resp2.text)
+        self.assertIn("carol@school.edu", resp2.text)
+        self.assertEqual(call_count, 1, "complete_authorization must be executed exactly once")
+
+    def test_replay_attempt_after_completion_is_strictly_rejected(self):
+        """Once authorization completes, any subsequent request with the same code
+        and state MUST be rejected with HTTP 400. Replay attacks are prohibited."""
+        state = self._fresh_state()
+        fake_user = type("U", (), {"email": "dave@school.edu", "display_name": "Dave"})()
+        with patch.object(self.oauth_web_mod, "complete_authorization", return_value=fake_user):
+            first = self.client.get(f"/auth/google/callback?code=code-exact&state={state}")
+            second = self.client.get(f"/auth/google/callback?code=code-exact&state={state}")
+
+        self.assertEqual(first.status_code, 200)
+        self.assertIn("Connected", first.text)
+        self.assertEqual(second.status_code, 400)
+        self.assertIn("Sign-in link expired or invalid", second.text)
+
+    def test_different_browser_sessions_isolated(self):
+        """Two different browser sessions initiate independent logins with different states.
+        Completing one has zero effect on the other, and neither can consume the other's state."""
+        state_1 = self._fresh_state()
+        state_2 = self._fresh_state()
+        self.assertNotEqual(state_1, state_2)
+
+        user_1 = type("U", (), {"email": "user1@school.edu", "display_name": "User One"})()
+        user_2 = type("U", (), {"email": "user2@personal.com", "display_name": "User Two"})()
+
+        with patch.object(self.oauth_web_mod, "complete_authorization", side_effect=[user_1, user_2]):
+            resp_1 = self.client.get(f"/auth/google/callback?code=code-1&state={state_1}")
+            resp_2 = self.client.get(f"/auth/google/callback?code=code-2&state={state_2}")
+
+        self.assertEqual(resp_1.status_code, 200)
+        self.assertIn("user1@school.edu", resp_1.text)
+        self.assertEqual(resp_2.status_code, 200)
+        self.assertIn("user2@personal.com", resp_2.text)
+
+        # Replays on both sessions are strictly rejected
+        replay_1 = self.client.get(f"/auth/google/callback?code=code-1&state={state_1}")
+        replay_2 = self.client.get(f"/auth/google/callback?code=code-2&state={state_2}")
+        self.assertEqual(replay_1.status_code, 400)
+        self.assertEqual(replay_2.status_code, 400)
 
     def test_success_response_never_contains_a_token_value(self):
         state = self._fresh_state()

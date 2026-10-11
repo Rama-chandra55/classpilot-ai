@@ -230,7 +230,8 @@ class TestBuildAuthorizationUrl(GoogleOAuthTestCase):
         self.assertEqual(code_verifier, "generated-verifier-xyz")
         _, kwargs = mock_flow.authorization_url.call_args
         self.assertEqual(kwargs["access_type"], "offline")
-        self.assertEqual(kwargs["prompt"], "consent")
+        self.assertIn("consent", kwargs["prompt"])
+        self.assertIn("select_account", kwargs["prompt"])
 
     def test_state_passed_through_to_flow_construction(self):
         mock_flow = MagicMock()

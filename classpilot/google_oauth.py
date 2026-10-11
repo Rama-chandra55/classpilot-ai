@@ -198,7 +198,7 @@ def build_authorization_url(state: str) -> tuple[str, str]:
     flow = _build_flow(state=state)
     auth_url, _ = flow.authorization_url(
         access_type="offline",       # required to receive a refresh_token
-        prompt="consent",            # ask every time, so a refresh_token is issued when possible
+        prompt="consent select_account",  # ask consent every time and allow selecting among multiple Google accounts
         include_granted_scopes="true",
     )
     return auth_url, flow.code_verifier
