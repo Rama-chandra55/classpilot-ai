@@ -192,7 +192,10 @@ class TestJobDiagnostics(unittest.TestCase):
             mock_client = MagicMock()
             mock_build.return_value = mock_client
             mock_client.courses.return_value.list.return_value.execute.return_value = {
-                "courses": [{"id": "c1", "name": "Math"}]
+                "courses": [{"id": "c1", "name": "Math", "courseState": "ACTIVE"}]
+            }
+            mock_client.courses.return_value.courseWork.return_value.list.return_value.execute.return_value = {
+                "courseWork": [{"id": "a1", "title": "Math HW"}]
             }
 
             mock_llm = MagicMock()
@@ -203,8 +206,19 @@ class TestJobDiagnostics(unittest.TestCase):
 
         # 1. Classroom verification: build called with classroom v1 and credentials
         mock_build.assert_called_once_with("classroom", "v1", credentials=mock_creds)
-        mock_client.courses.return_value.list.assert_called_once_with(pageSize=1)
+        mock_client.courses.return_value.list.assert_called_once_with(pageSize=50)
         mock_logger.info.assert_any_call("   [PASS] Successfully fetched %d course(s)", 1)
+        mock_client.courses.return_value.courseWork.return_value.list.assert_called_once_with(
+            courseId="c1", pageSize=50
+        )
+        mock_logger.info.assert_any_call(
+            "   [PASS] Course '%s' (id: %s): Successfully retrieved %d assignment(s)",
+            "Math", "c1", 1
+        )
+        mock_logger.info.assert_any_call(
+            "   Classroom coursework summary for user %s: %d passed, %d failed, %d skipped",
+            "user_1", 1, 0, 0
+        )
 
         # 2. LLM verification: uses llm_provider and actual generate_message signature
         mock_llm_factory.assert_called_once_with(mock_config)
@@ -218,6 +232,227 @@ class TestJobDiagnostics(unittest.TestCase):
         smtp_instance.login.assert_called_once_with("user@example.com", "password")
         smtp_instance.sendmail.assert_not_called()
         mock_logger.info.assert_any_call("   [PASS] Successfully connected and authenticated to SMTP server")
+
+    @patch("classpilot.job.logger")
+    def test_run_diagnostics_coursework_empty_list(self, mock_logger):
+        """Empty coursework list is reported as [PASS] with 0 assignments and counted in summary."""
+        from classpilot.job import run_diagnostics
+
+        mock_creds = MagicMock()
+        mock_config = MagicMock()
+        mock_config.llm_provider = "groq"
+        mock_config.notifier_backend = "email"
+        mock_config.smtp_host = "smtp.example.com"
+        mock_config.smtp_port = 587
+        mock_config.smtp_user = "user@example.com"
+        mock_config.smtp_password = "password"
+
+        with patch("googleapiclient.discovery.build") as mock_build, \
+             patch("classpilot.llm.create_llm_provider") as mock_llm_factory, \
+             patch("smtplib.SMTP"):
+
+            mock_client = MagicMock()
+            mock_build.return_value = mock_client
+            mock_client.courses.return_value.list.return_value.execute.return_value = {
+                "courses": [{"id": "c2", "name": "History", "courseState": "ACTIVE"}]
+            }
+            mock_client.courses.return_value.courseWork.return_value.list.return_value.execute.return_value = {
+                "courseWork": []
+            }
+
+            mock_llm = MagicMock()
+            mock_llm.generate_message.return_value = "Diagnostic test response"
+            mock_llm_factory.return_value = mock_llm
+
+            run_diagnostics("user_1", mock_creds, mock_config)
+
+        mock_logger.info.assert_any_call(
+            "   [PASS] Course '%s' (id: %s): 0 assignments found (empty coursework list)",
+            "History", "c2"
+        )
+        mock_logger.info.assert_any_call(
+            "   Classroom coursework summary for user %s: %d passed, %d failed, %d skipped",
+            "user_1", 1, 0, 0
+        )
+
+    @patch("classpilot.job.logger")
+    def test_run_diagnostics_coursework_http_403_error(self, mock_logger):
+        """HTTP 403 error on coursework is reported as [FAIL] with permission denied details."""
+        from classpilot.job import run_diagnostics
+
+        mock_creds = MagicMock()
+        mock_config = MagicMock()
+        mock_config.llm_provider = "groq"
+        mock_config.notifier_backend = "email"
+        mock_config.smtp_host = "smtp.example.com"
+        mock_config.smtp_port = 587
+        mock_config.smtp_user = "user@example.com"
+        mock_config.smtp_password = "password"
+
+        with patch("googleapiclient.discovery.build") as mock_build, \
+             patch("classpilot.llm.create_llm_provider") as mock_llm_factory, \
+             patch("smtplib.SMTP"):
+
+            mock_client = MagicMock()
+            mock_build.return_value = mock_client
+            mock_client.courses.return_value.list.return_value.execute.return_value = {
+                "courses": [{"id": "c3", "name": "Restricted Physics", "courseState": "ACTIVE"}]
+            }
+
+            # Simulate HTTP 403 HttpError
+            mock_resp = MagicMock()
+            mock_resp.status = 403
+            http_err = Exception("HttpError 403: The caller does not have permission")
+            http_err.resp = mock_resp
+            http_err.reason = "Permission denied for coursework"
+            mock_client.courses.return_value.courseWork.return_value.list.return_value.execute.side_effect = http_err
+
+            mock_llm = MagicMock()
+            mock_llm.generate_message.return_value = "Diagnostic test response"
+            mock_llm_factory.return_value = mock_llm
+
+            run_diagnostics("user_1", mock_creds, mock_config)
+
+        mock_logger.error.assert_any_call(
+            "   [FAIL] Course '%s' (id: %s): HTTP 403 Forbidden - %s",
+            "Restricted Physics", "c3", "Permission denied for coursework"
+        )
+        mock_logger.info.assert_any_call(
+            "   Classroom coursework summary for user %s: %d passed, %d failed, %d skipped",
+            "user_1", 0, 1, 0
+        )
+        # LLM and SMTP diagnostics still run
+        mock_logger.info.assert_any_call("   [PASS] Successfully generated text using %s", "groq")
+        mock_logger.info.assert_any_call("   [PASS] Successfully connected and authenticated to SMTP server")
+
+    @patch("classpilot.job.logger")
+    def test_run_diagnostics_coursework_skips_inactive_course(self, mock_logger):
+        """Non-active courses (e.g. ARCHIVED) are reported as [SKIP] and not queried for coursework."""
+        from classpilot.job import run_diagnostics
+
+        mock_creds = MagicMock()
+        mock_config = MagicMock()
+        mock_config.llm_provider = "groq"
+        mock_config.notifier_backend = "email"
+        mock_config.smtp_host = "smtp.example.com"
+        mock_config.smtp_port = 587
+        mock_config.smtp_user = "user@example.com"
+        mock_config.smtp_password = "password"
+
+        with patch("googleapiclient.discovery.build") as mock_build, \
+             patch("classpilot.llm.create_llm_provider") as mock_llm_factory, \
+             patch("smtplib.SMTP"):
+
+            mock_client = MagicMock()
+            mock_build.return_value = mock_client
+            mock_client.courses.return_value.list.return_value.execute.return_value = {
+                "courses": [{"id": "c4", "name": "Old Chemistry", "courseState": "ARCHIVED"}]
+            }
+
+            mock_llm = MagicMock()
+            mock_llm.generate_message.return_value = "Diagnostic test response"
+            mock_llm_factory.return_value = mock_llm
+
+            run_diagnostics("user_1", mock_creds, mock_config)
+
+        mock_client.courses.return_value.courseWork.return_value.list.assert_not_called()
+        mock_logger.info.assert_any_call(
+            "   [SKIP] Course '%s' (id: %s): Course is not active (state: %s)",
+            "Old Chemistry", "c4", "ARCHIVED"
+        )
+        mock_logger.info.assert_any_call(
+            "   Classroom coursework summary for user %s: %d passed, %d failed, %d skipped",
+            "user_1", 0, 0, 1
+        )
+
+    @patch("classpilot.job.logger")
+    def test_run_diagnostics_coursework_pagination_capped(self, mock_logger):
+        """Coursework pagination follows nextPageToken and caps at max_coursework_pages."""
+        from classpilot.job import run_diagnostics
+
+        mock_creds = MagicMock()
+        mock_config = MagicMock()
+        mock_config.llm_provider = "groq"
+        mock_config.notifier_backend = "email"
+        mock_config.smtp_host = "smtp.example.com"
+        mock_config.smtp_port = 587
+        mock_config.smtp_user = "user@example.com"
+        mock_config.smtp_password = "password"
+
+        with patch("googleapiclient.discovery.build") as mock_build, \
+             patch("classpilot.llm.create_llm_provider") as mock_llm_factory, \
+             patch("smtplib.SMTP"):
+
+            mock_client = MagicMock()
+            mock_build.return_value = mock_client
+            mock_client.courses.return_value.list.return_value.execute.return_value = {
+                "courses": [{"id": "c5", "name": "Huge Course", "courseState": "ACTIVE"}]
+            }
+
+            # Return 4 pages with nextPageTokens
+            page1 = {"courseWork": [{"id": "a1"}], "nextPageToken": "token2"}
+            page2 = {"courseWork": [{"id": "a2"}], "nextPageToken": "token3"}
+            page3 = {"courseWork": [{"id": "a3"}], "nextPageToken": "token4"}
+            page4 = {"courseWork": [{"id": "a4"}], "nextPageToken": "token5"}
+            mock_client.courses.return_value.courseWork.return_value.list.return_value.execute.side_effect = [
+                page1, page2, page3, page4
+            ]
+
+            mock_llm = MagicMock()
+            mock_llm.generate_message.return_value = "Diagnostic test response"
+            mock_llm_factory.return_value = mock_llm
+
+            run_diagnostics("user_1", mock_creds, mock_config)
+
+        # Capped at max 3 pages (a1, a2, a3 = 3 assignments)
+        mock_logger.info.assert_any_call(
+            "   [PASS] Course '%s' (id: %s): Successfully retrieved %d assignment(s)",
+            "Huge Course", "c5", 3
+        )
+
+    @patch("classpilot.job.logger")
+    def test_run_diagnostics_sanitizes_tokens_and_secrets(self, mock_logger):
+        """Error messages during coursework fetch never log API keys or bearer tokens."""
+        from classpilot.job import run_diagnostics
+
+        mock_creds = MagicMock()
+        mock_config = MagicMock()
+        mock_config.llm_provider = "groq"
+        mock_config.notifier_backend = "email"
+        mock_config.smtp_host = "smtp.example.com"
+        mock_config.smtp_port = 587
+        mock_config.smtp_user = "user@example.com"
+        mock_config.smtp_password = "password"
+
+        secret_key = "AIzaSySuperSecretApiKey1234567890123"
+        secret_token = "ya29.a0AfH6SecretBearerToken123"
+
+        with patch("googleapiclient.discovery.build") as mock_build, \
+             patch("classpilot.llm.create_llm_provider") as mock_llm_factory, \
+             patch("smtplib.SMTP"):
+
+            mock_client = MagicMock()
+            mock_build.return_value = mock_client
+            mock_client.courses.return_value.list.return_value.execute.return_value = {
+                "courses": [{"id": "c6", "name": "Secret Course", "courseState": "ACTIVE"}]
+            }
+
+            mock_client.courses.return_value.courseWork.return_value.list.return_value.execute.side_effect = (
+                Exception(f"Error at https://api.com?key={secret_key} with Bearer {secret_token}")
+            )
+
+            mock_llm = MagicMock()
+            mock_llm.generate_message.return_value = "Diagnostic test response"
+            mock_llm_factory.return_value = mock_llm
+
+            run_diagnostics("user_1", mock_creds, mock_config)
+
+        for call in mock_logger.error.call_args_list:
+            log_str = " ".join(str(arg) for arg in call.args)
+            assert secret_key not in log_str
+            assert secret_token not in log_str
+            assert "[REDACTED]" in log_str or "[REDACTED_API_KEY]" in log_str
+
 
     @patch("classpilot.job.logger")
     def test_run_diagnostics_with_real_classpilot_config(self, mock_logger):

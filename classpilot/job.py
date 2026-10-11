@@ -23,23 +23,142 @@ from classpilot.state_store import StateStore
 logger = logging.getLogger(__name__)
 
 
+import re
 import sys
+
+
+def _sanitize_diagnostic_message(msg: str) -> str:
+    """Redact sensitive API keys or credentials from error messages."""
+    msg = re.sub(r'([?&]key=)[^&\s]+', r'\1[REDACTED]', msg)
+    msg = re.sub(r'AIza[0-9A-Za-z-_]{35}', '[REDACTED_API_KEY]', msg)
+    msg = re.sub(r'Bearer\s+[A-Za-z0-9._~+/-]+', 'Bearer [REDACTED]', msg)
+    return msg
+
 
 def run_diagnostics(user_id: str, credentials, config) -> None:
     """Run read-only verifications for all critical integrations."""
     logger.info("========================================")
     logger.info("DRY RUN DIAGNOSTICS FOR USER: %s", user_id)
     logger.info("========================================")
-    
+
     # 1. Verify Classroom assignment fetching
-    logger.info("1. Verifying Google Classroom connectivity...")
+    logger.info("1. Verifying Google Classroom connectivity and assignment retrieval...")
     try:
         from googleapiclient.discovery import build
         client = build("classroom", "v1", credentials=credentials)
-        courses = client.courses().list(pageSize=1).execute()
-        logger.info("   [PASS] Successfully fetched %d course(s)", len(courses.get('courses', [])))
+
+        raw_courses = []
+        page_token = None
+        max_course_pages = 3
+        course_pages_fetched = 0
+
+        while course_pages_fetched < max_course_pages:
+            params = {"pageSize": 50}
+            if page_token:
+                params["pageToken"] = page_token
+            courses_result = client.courses().list(**params).execute()
+            if isinstance(courses_result, dict):
+                batch = courses_result.get("courses", [])
+                if isinstance(batch, list):
+                    raw_courses.extend(batch)
+                page_token = courses_result.get("nextPageToken")
+            else:
+                page_token = None
+            course_pages_fetched += 1
+            if not page_token:
+                break
+
+        logger.info("   [PASS] Successfully fetched %d course(s)", len(raw_courses))
+
+        passed_count = 0
+        failed_count = 0
+        skipped_count = 0
+
+        for course in raw_courses:
+            course_id = course.get("id") if isinstance(course, dict) else None
+            course_name = (course.get("name") if isinstance(course, dict) else None) or "Unnamed Course"
+            course_state = (course.get("courseState") if isinstance(course, dict) else None) or "ACTIVE"
+
+            if not course_id:
+                logger.info("   [SKIP] Course '%s': Missing course ID", course_name)
+                skipped_count += 1
+                continue
+
+            # Skip non-active courses (e.g. ARCHIVED, DECLINED, PROVISIONED)
+            if course_state != "ACTIVE":
+                logger.info(
+                    "   [SKIP] Course '%s' (id: %s): Course is not active (state: %s)",
+                    course_name, course_id, course_state
+                )
+                skipped_count += 1
+                continue
+
+            # Attempt read-only coursework retrieval with pagination capped
+            try:
+                assignments_count = 0
+                cw_page_token = None
+                cw_pages_fetched = 0
+                max_coursework_pages = 3
+
+                while cw_pages_fetched < max_coursework_pages:
+                    cw_params = {"courseId": course_id, "pageSize": 50}
+                    if cw_page_token:
+                        cw_params["pageToken"] = cw_page_token
+                    cw_res = client.courses().courseWork().list(**cw_params).execute()
+                    if isinstance(cw_res, dict):
+                        cw_items = cw_res.get("courseWork", [])
+                        if isinstance(cw_items, list):
+                            assignments_count += len(cw_items)
+                        cw_page_token = cw_res.get("nextPageToken")
+                    else:
+                        cw_page_token = None
+                    cw_pages_fetched += 1
+                    if not cw_page_token:
+                        break
+
+                if assignments_count > 0:
+                    logger.info(
+                        "   [PASS] Course '%s' (id: %s): Successfully retrieved %d assignment(s)",
+                        course_name, course_id, assignments_count
+                    )
+                else:
+                    logger.info(
+                        "   [PASS] Course '%s' (id: %s): 0 assignments found (empty coursework list)",
+                        course_name, course_id
+                    )
+                passed_count += 1
+
+            except Exception as course_err:
+                resp = getattr(course_err, "resp", None)
+                status = getattr(resp, "status", None)
+                is_403 = (
+                    status == 403
+                    or getattr(course_err, "status_code", None) == 403
+                    or "403" in str(course_err)
+                )
+                if is_403:
+                    reason = getattr(course_err, "reason", None) or "Permission denied"
+                    logger.error(
+                        "   [FAIL] Course '%s' (id: %s): HTTP 403 Forbidden - %s",
+                        course_name, course_id, reason
+                    )
+                else:
+                    sanitized_err = _sanitize_diagnostic_message(str(course_err))
+                    logger.error(
+                        "   [FAIL] Course '%s' (id: %s): CourseWork retrieval failed: %s",
+                        course_name, course_id, sanitized_err
+                    )
+                failed_count += 1
+
+        logger.info(
+            "   Classroom coursework summary for user %s: %d passed, %d failed, %d skipped",
+            user_id, passed_count, failed_count, skipped_count
+        )
+
     except Exception as exc:
-        logger.error("   [FAIL] Classroom fetch failed: %s", exc)
+        sanitized_exc = _sanitize_diagnostic_message(str(exc))
+        logger.error("   [FAIL] Classroom fetch failed: %s", sanitized_exc)
+
 
     # 2. Verify LLM configuration
     try:
