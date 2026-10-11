@@ -32,12 +32,43 @@ Phase 3 — user-scoped, credentials-based:
 import json
 import logging
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Callable, List, Optional
 
 from . import study_client
 from .state_store import StateStore, DEFAULT_USER_ID
 
 logger = logging.getLogger(__name__)
+
+
+def is_historical_assignment(assignment: dict, now: Optional[datetime] = None) -> bool:
+    """
+    Check if an assignment is historical (e.g. deadline has already passed).
+    Historical assignments should not trigger 'new assignment' notifications
+    on first startup or during regular polling.
+    """
+    if now is None:
+        now = datetime.now(tz=timezone.utc)
+
+    due_date = assignment.get("due_date") or assignment.get("dueDate")
+    due_time = assignment.get("due_time") or assignment.get("dueTime")
+    if isinstance(due_date, dict):
+        from .deadline_scheduler import _parse_due_datetime
+        due_dt = _parse_due_datetime(due_date, due_time)
+        if due_dt is not None:
+            return due_dt <= now
+
+    created_str = assignment.get("created") or assignment.get("creationTime")
+    if created_str:
+        try:
+            clean_str = str(created_str).replace("Z", "+00:00")
+            created_dt = datetime.fromisoformat(clean_str)
+            if (now - created_dt).days > 14:
+                return True
+        except Exception:
+            pass
+
+    return False
 
 
 @dataclass
@@ -69,6 +100,7 @@ class AssignmentWatcher:
         on_event: Callable[[AssignmentEvent], None],
         credentials,
         user_id: str = DEFAULT_USER_ID,
+        filter_historical: bool = False,
     ):
         """
         Args:
@@ -79,11 +111,14 @@ class AssignmentWatcher:
             user_id: identifies whose dedup state to read/write in
                      state_store — must correspond to the same user as
                      `credentials`.
+            filter_historical: if True, suppresses 'new' events for historical assignments
+                               (e.g. past due dates) on first startup or subsequent polls.
         """
         self._state = state_store
         self._on_event = on_event
         self._credentials = credentials
         self._user_id = user_id
+        self._filter_historical = filter_historical
 
     def check_once(self) -> List[AssignmentEvent]:
         """
@@ -148,6 +183,14 @@ class AssignmentWatcher:
         known = self._state.get_known_assignment(course_id, assignment_id, user_id=self._user_id)
 
         if known is None:
+            # Check if this assignment is historical
+            if self._filter_historical and is_historical_assignment(assignment):
+                self._state.record_new_assignment(
+                    course_id, assignment_id, title, due_date, due_time, user_id=self._user_id,
+                )
+                logger.info("Historical assignment baseline recorded (no notification): %s (%s)", title, course_name)
+                return None
+
             # Brand new assignment we've never recorded before
             won = self._state.record_new_assignment(
                 course_id, assignment_id, title, due_date, due_time, user_id=self._user_id,

@@ -247,3 +247,115 @@ class StateStore:
                 (user_id, course_id, assignment_id, offset_minutes),
             ).fetchone()
             return row is not None
+
+
+class ReadOnlyStateStore(StateStore):
+    """
+    Read-only adapter for StateStore that strictly forbids and prevents any database writes.
+    Used during watcher simulations to ensure zero mutations to PostgreSQL records,
+    notification claims, checkpoints, or assignment snapshots.
+    """
+
+    def __init__(self, real_store: Optional[StateStore] = None):
+        super().__init__()
+        self._real_store = real_store or StateStore()
+        # In-memory tracking for simulation session
+        self._simulated_known: Dict[tuple, Dict[str, Any]] = {}
+        self._simulated_sent_reminders: set = set()
+
+    # ---------- Read Methods (delegate to real store or in-memory overlay) ----------
+
+    def get_watcher_enabled(self, user_id: str) -> bool:
+        return self._real_store.get_watcher_enabled(user_id)
+
+    def get_enabled_watchers(self) -> List[str]:
+        return self._real_store.get_enabled_watchers()
+
+    def get_known_assignment(
+        self, course_id: str, assignment_id: str, user_id: str = DEFAULT_USER_ID
+    ) -> Optional[Dict[str, Any]]:
+        sim_key = (user_id, course_id, assignment_id)
+        if sim_key in self._simulated_known:
+            return self._simulated_known[sim_key]
+        return self._real_store.get_known_assignment(course_id, assignment_id, user_id=user_id)
+
+    def get_all_assignments(self, user_id: str) -> List[Dict[str, Any]]:
+        db_assignments = self._real_store.get_all_assignments(user_id)
+        # Merge in any simulated assignments that were added during this session
+        res = {(a["course_id"], a["assignment_id"]): a for a in db_assignments}
+        for (u, c, a), val in self._simulated_known.items():
+            if u == user_id:
+                res[(c, a)] = val
+        return list(res.values())
+
+    def has_sent_reminder(
+        self, course_id: str, assignment_id: str, offset_minutes: int, user_id: str = DEFAULT_USER_ID
+    ) -> bool:
+        if (user_id, course_id, assignment_id, offset_minutes) in self._simulated_sent_reminders:
+            return True
+        return self._real_store.has_sent_reminder(course_id, assignment_id, offset_minutes, user_id=user_id)
+
+    # ---------- Write Methods (blocked, pure in-memory simulation) ----------
+
+    def record_new_assignment(
+        self,
+        course_id: str,
+        assignment_id: str,
+        title: str,
+        due_date: Optional[dict],
+        due_time: Optional[dict],
+        user_id: str = DEFAULT_USER_ID,
+    ) -> bool:
+        # Enforce read-only: never write to DB
+        key = (user_id, course_id, assignment_id)
+        if key in self._simulated_known or self._real_store.get_known_assignment(course_id, assignment_id, user_id=user_id):
+            return False
+        self._simulated_known[key] = {
+            "user_id": user_id,
+            "course_id": course_id,
+            "assignment_id": assignment_id,
+            "title": title,
+            "due_date_json": json.dumps(due_date) if due_date else None,
+            "due_time_json": json.dumps(due_time) if due_time else None,
+        }
+        return True
+
+    def update_assignment_deadline(
+        self,
+        course_id: str,
+        assignment_id: str,
+        title: str,
+        new_due_date: Optional[dict],
+        new_due_time: Optional[dict],
+        old_due_date_json: Optional[str],
+        old_due_time_json: Optional[str],
+        user_id: str = DEFAULT_USER_ID,
+    ) -> bool:
+        # Enforce read-only: never write to DB
+        key = (user_id, course_id, assignment_id)
+        self._simulated_known[key] = {
+            "user_id": user_id,
+            "course_id": course_id,
+            "assignment_id": assignment_id,
+            "title": title,
+            "due_date_json": json.dumps(new_due_date) if new_due_date else None,
+            "due_time_json": json.dumps(new_due_time) if new_due_time else None,
+        }
+        return True
+
+    def mark_reminder_sent(
+        self, course_id: str, assignment_id: str, offset_minutes: int, user_id: str = DEFAULT_USER_ID
+    ) -> bool:
+        # Enforce read-only: never write to DB
+        key = (user_id, course_id, assignment_id, offset_minutes)
+        if key in self._simulated_sent_reminders or self._real_store.has_sent_reminder(course_id, assignment_id, offset_minutes, user_id=user_id):
+            return False
+        self._simulated_sent_reminders.add(key)
+        return True
+
+    def set_watcher_enabled(self, user_id: str, enabled: bool) -> None:
+        raise RuntimeError("Write attempted on ReadOnlyStateStore: set_watcher_enabled")
+
+    def upsert_assignment_metadata(self, *args, **kwargs) -> None:
+        raise RuntimeError("Write attempted on ReadOnlyStateStore: upsert_assignment_metadata")
+

@@ -458,8 +458,40 @@ def run_test_email(
 def main() -> None:
     is_dry_run = "--dry-run" in sys.argv
     is_test_email = "--test-email" in sys.argv
+    is_simulate_watcher = "--simulate-watcher" in sys.argv
     config = get_config()
     configure_logging(config.log_level)
+
+    if is_simulate_watcher:
+        logger.info("Starting ClassPilot in WATCHER SIMULATION mode")
+        course_id = None
+        user_id = None
+
+        for idx, arg in enumerate(sys.argv):
+            if arg == "--course-id" and idx + 1 < len(sys.argv):
+                course_id = sys.argv[idx + 1]
+            elif arg.startswith("--course-id="):
+                course_id = arg.split("=", 1)[1]
+            elif arg == "--user-id" and idx + 1 < len(sys.argv):
+                user_id = sys.argv[idx + 1]
+            elif arg.startswith("--user-id="):
+                user_id = arg.split("=", 1)[1]
+
+        if not course_id:
+            course_id = os.getenv("SIMULATION_COURSE_ID") or os.getenv("TEST_COURSE_ID")
+        if not user_id:
+            user_id = os.getenv("SIMULATION_USER_ID") or os.getenv("TEST_USER_ID")
+
+        from classpilot.simulation import run_watcher_simulation
+        sim_result = run_watcher_simulation(config, user_id=user_id, course_id=course_id)
+        if sim_result.success:
+            logger.info("Watcher simulation finished successfully.")
+            sys.exit(0)
+            return
+        else:
+            logger.error("Watcher simulation failed.")
+            sys.exit(1)
+            return
 
     if is_test_email:
         logger.info("Starting ClassPilot in TEST EMAIL mode")
@@ -481,7 +513,6 @@ def main() -> None:
             elif arg.startswith("--user-id="):
                 user_id = arg.split("=", 1)[1]
 
-        import os
         if not recipient:
             recipient = os.getenv("TEST_RECIPIENT_EMAIL")
         if not course_id:
