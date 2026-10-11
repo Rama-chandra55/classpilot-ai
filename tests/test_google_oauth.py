@@ -757,7 +757,8 @@ class TestGrantedScopeSupersetHandling(GoogleOAuthTestCase):
         this is not an omission, it is a failure to grant."""
         with self.assertRaises(GoogleOAuthError) as ctx:
             self._run_exchange("")
-        for scope in get_web_flow_scopes():
+        from classpilot.google_oauth import _OPTIONAL_TEACHER_SCOPES
+        for scope in set(get_web_flow_scopes()) - _OPTIONAL_TEACHER_SCOPES:
             self.assertIn(scope, str(ctx.exception))
 
     def test_without_the_fix_the_real_library_would_raise_on_superset(self):
@@ -809,8 +810,61 @@ class TestVerifyRequiredScopesPresent(GoogleOAuthTestCase):
     def test_error_lists_every_missing_scope(self):
         with self.assertRaises(GoogleOAuthError) as ctx:
             _verify_required_scopes_present([])
-        for scope in get_web_flow_scopes():
+        from classpilot.google_oauth import _OPTIONAL_TEACHER_SCOPES
+        for scope in set(get_web_flow_scopes()) - _OPTIONAL_TEACHER_SCOPES:
             self.assertIn(scope, str(ctx.exception))
+
+    def test_personal_account_with_student_coursework_scope_is_accepted(self):
+        """A personal account granting all required scopes plus student coursework
+        (.coursework.me) must succeed even when teacher scope
+        (.coursework.students.readonly) is omitted by Google."""
+        curated = get_web_flow_scopes()
+        granted = [
+            s for s in curated
+            if s != "https://www.googleapis.com/auth/classroom.coursework.students.readonly"
+        ]
+        _verify_required_scopes_present(granted)  # must not raise
+
+    def test_missing_all_coursework_scopes_raises(self):
+        """An account missing both student coursework and teacher coursework scopes
+        must fail loudly."""
+        curated = get_web_flow_scopes()
+        granted = [
+            s for s in curated
+            if s not in (
+                "https://www.googleapis.com/auth/classroom.coursework.me",
+                "https://www.googleapis.com/auth/classroom.coursework.students.readonly",
+                "https://www.googleapis.com/auth/classroom.coursework.students",
+            )
+        ]
+        with self.assertRaises(GoogleOAuthError) as ctx:
+            _verify_required_scopes_present(granted)
+        self.assertIn("classroom.coursework.me", str(ctx.exception))
+
+    def test_missing_essential_base_scope_raises(self):
+        """An account missing an essential scope (e.g. announcements or drive)
+        must fail loudly."""
+        curated = get_web_flow_scopes()
+        granted = [
+            s for s in curated
+            if s != "https://www.googleapis.com/auth/classroom.announcements"
+        ]
+        with self.assertRaises(GoogleOAuthError) as ctx:
+            _verify_required_scopes_present(granted)
+        self.assertIn("classroom.announcements", str(ctx.exception))
+
+    def test_teacher_only_scope_without_student_coursework_scope_raises(self):
+        """A teacher scope alone cannot substitute for the required student coursework
+        scope (.coursework.me) because active student-facing Classroom operations
+        require .coursework.me."""
+        curated = get_web_flow_scopes()
+        granted = [
+            s for s in curated
+            if s != "https://www.googleapis.com/auth/classroom.coursework.me"
+        ]
+        with self.assertRaises(GoogleOAuthError) as ctx:
+            _verify_required_scopes_present(granted)
+        self.assertIn("classroom.coursework.me", str(ctx.exception))
 
     def test_broader_historical_scopes_satisfying_readonly_requirements(self):
         curated = get_web_flow_scopes()
@@ -828,19 +882,6 @@ class TestVerifyRequiredScopesPresent(GoogleOAuthTestCase):
         ])
         # Must not raise an error because the broader scopes satisfy the requirements
         _verify_required_scopes_present(granted)
-
-    def test_unrelated_scopes_not_accepted_as_substitutes(self):
-        curated = get_web_flow_scopes()
-        granted = [
-            s for s in curated 
-            if s != "https://www.googleapis.com/auth/classroom.coursework.students.readonly"
-        ]
-        # Append a scope that is related but NOT the accepted superset
-        granted.append("https://www.googleapis.com/auth/classroom.coursework.me")
-        
-        with self.assertRaises(GoogleOAuthError) as ctx:
-            _verify_required_scopes_present(granted)
-        self.assertIn("classroom.coursework.students.readonly", str(ctx.exception))
 
 
 # ---------- Requirement 2: never overwrite a valid refresh token with None ----------

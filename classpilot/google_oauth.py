@@ -345,7 +345,32 @@ def _verify_required_scopes_present(granted_scopes: list[str]) -> None:
     list + OIDC scopes, entirely unaffected by what any particular
     authorization happened to be granted.
     """
-    required = set(get_web_flow_scopes())
+# Teacher-specific coursework read scope: requested during OAuth flow for
+# accounts holding teacher/admin privileges, but optional for standard student
+# or personal Google accounts where the student coursework scope (.coursework.me)
+# provides the necessary coursework read capability for all ClassPilot operations.
+_OPTIONAL_TEACHER_SCOPES = {
+    "https://www.googleapis.com/auth/classroom.coursework.students.readonly",
+}
+
+
+def _verify_required_scopes_present(granted_scopes: list[str]) -> None:
+    """
+    Independently verify every one of ClassPilot's required scopes was
+    actually granted.
+
+    Capability-based verification:
+      - All core scopes (courses, materials, announcements, topics, drive, OIDC)
+        are strictly required.
+      - Coursework read capability requires at least one valid coursework scope:
+        either student-level (`classroom.coursework.me`) or teacher-level
+        (`classroom.coursework.students.readonly` or `classroom.coursework.students`).
+      - If an account has `classroom.coursework.me`, missing teacher-only scope
+        `classroom.coursework.students.readonly` does not block authorization.
+      - If Google's response is missing a genuinely required scope (e.g. the student
+        unchecked drive access or announcements), authorization fails loudly.
+    """
+    required = set(get_web_flow_scopes()) - _OPTIONAL_TEACHER_SCOPES
     granted = set(granted_scopes)
     
     # Map read-only scopes to their historical read/write supersets
@@ -361,6 +386,15 @@ def _verify_required_scopes_present(granted_scopes: list[str]) -> None:
         if req in superset_map and superset_map[req] in granted:
             continue
         missing.add(req)
+
+    # Verify that at least one coursework scope is granted
+    has_coursework = (
+        "https://www.googleapis.com/auth/classroom.coursework.me" in granted
+        or "https://www.googleapis.com/auth/classroom.coursework.students.readonly" in granted
+        or "https://www.googleapis.com/auth/classroom.coursework.students" in granted
+    )
+    if not has_coursework:
+        missing.add("https://www.googleapis.com/auth/classroom.coursework.me")
 
     if missing:
         raise GoogleOAuthError(

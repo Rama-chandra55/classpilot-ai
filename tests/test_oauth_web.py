@@ -251,6 +251,30 @@ class TestGoogleCallbackSuccess(_OAuthWebTestCase):
         self.assertEqual(replay_1.status_code, 400)
         self.assertEqual(replay_2.status_code, 400)
 
+    def test_personal_account_missing_teacher_scope_completes_successfully(self):
+        """When a personal Gmail account authenticates, Google omits the teacher-only
+        scope (classroom.coursework.students.readonly). The callback must succeed
+        cleanly with 200 OK because the student coursework scope (.coursework.me) is present."""
+        state = self._fresh_state()
+        fake_user = type("U", (), {"email": "personal.student@gmail.com", "display_name": "Personal Student"})()
+        with patch.object(self.oauth_web_mod, "complete_authorization", return_value=fake_user):
+            response = self.client.get(f"/auth/google/callback?code=code-personal&state={state}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Connected!", response.text)
+        self.assertIn("personal.student@gmail.com", response.text)
+
+    def test_college_account_with_historical_scopes_completes_successfully(self):
+        """When the authorized college account authenticates, it possesses the historical
+        superset scopes (classroom.coursework.students and drive). The callback must succeed
+        cleanly with 200 OK."""
+        state = self._fresh_state()
+        fake_user = type("U", (), {"email": "727824tuam036@skct.edu.in", "display_name": "727824TUAM036 RAMACHANDRA J"})()
+        with patch.object(self.oauth_web_mod, "complete_authorization", return_value=fake_user):
+            response = self.client.get(f"/auth/google/callback?code=code-college&state={state}")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Connected!", response.text)
+        self.assertIn("727824tuam036@skct.edu.in", response.text)
+
     def test_success_response_never_contains_a_token_value(self):
         state = self._fresh_state()
         fake_user = type("U", (), {"email": "alice@school.edu", "display_name": "Alice"})()
