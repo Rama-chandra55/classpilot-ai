@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 import re
 import sys
+from typing import Optional
 
 
 def _sanitize_diagnostic_message(msg: str) -> str:
@@ -187,37 +188,275 @@ def run_diagnostics(user_id: str, credentials, config) -> None:
     except Exception as exc:
         logger.error("   [FAIL] SMTP verification failed: %s", exc)
 
+
+def run_test_email(
+    config,
+    recipient_email: str,
+    course_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+) -> bool:
+    """
+    Execute a safe, manual end-to-end email notification test.
+
+    1. Validates the recipient email address.
+    2. Loads stored credentials for the connected college account.
+    3. Fetches at most one real assignment from an active Classroom course (or specific course_id).
+    4. Generates a short, professional notification with Gemini.
+    5. Sends exactly one email to recipient_email prefixed with [CLASSPILOT TEST].
+    6. Never modifies notification history or touches the production watcher.
+    """
+    logger.info("========================================")
+    logger.info("STARTING CLASSPILOT TEST EMAIL MODE")
+    logger.info("========================================")
+
+    # 1. Validate recipient email
+    if not recipient_email or not recipient_email.strip():
+        logger.error("Test email aborted: recipient_email is required.")
+        return False
+
+    recipient_email = recipient_email.strip()
+    email_regex = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
+    if not re.match(email_regex, recipient_email):
+        sanitized_email = _sanitize_diagnostic_message(recipient_email)
+        logger.error("Test email aborted: '%s' is not a valid email address.", sanitized_email)
+        return False
+
+    # 2. Select authorized college account
+    state_store = StateStore()
+    user_store = UserStore()
+
+    target_user_id = user_id
+    if not target_user_id:
+        enabled_users = state_store.get_enabled_watchers()
+        if enabled_users:
+            target_user_id = enabled_users[0]
+        else:
+            logger.error("Test email aborted: No enabled college account found in database.")
+            return False
+
+    masked_id = f"***{target_user_id[-4:]}" if len(target_user_id) >= 4 else "***"
+    logger.info("Selected authorized college account (%s) for Classroom coursework test.", masked_id)
+
+    try:
+        credentials = get_authorized_credentials(target_user_id, user_store)
+    except Exception as exc:
+        sanitized_exc = _sanitize_diagnostic_message(str(exc))
+        logger.error("Failed to load Google credentials for selected account: %s", sanitized_exc)
+        return False
+
+    # 3. Fetch at most one real assignment from Google Classroom
+    try:
+        from googleapiclient.discovery import build
+        client = build("classroom", "v1", credentials=credentials)
+    except Exception as exc:
+        sanitized_exc = _sanitize_diagnostic_message(str(exc))
+        logger.error("Failed to initialize Google Classroom client: %s", sanitized_exc)
+        return False
+
+    candidate_courses = []
+    if course_id and course_id.strip():
+        cid = course_id.strip()
+        try:
+            course = client.courses().get(id=cid).execute()
+            if isinstance(course, dict):
+                candidate_courses.append(course)
+        except Exception as exc:
+            sanitized_exc = _sanitize_diagnostic_message(str(exc))
+            resp = getattr(exc, "resp", None)
+            if getattr(resp, "status", None) == 403 or "403" in str(exc):
+                logger.error("Google Classroom HTTP 403 Forbidden accessing course '%s': %s", cid, sanitized_exc)
+            else:
+                logger.error("Failed to fetch course '%s': %s", cid, sanitized_exc)
+            return False
+    else:
+        try:
+            courses_resp = client.courses().list(pageSize=20).execute()
+            all_courses = courses_resp.get("courses", []) if isinstance(courses_resp, dict) else []
+            candidate_courses = [
+                c for c in all_courses
+                if isinstance(c, dict) and c.get("courseState", "ACTIVE") == "ACTIVE" and c.get("id")
+            ]
+        except Exception as exc:
+            sanitized_exc = _sanitize_diagnostic_message(str(exc))
+            resp = getattr(exc, "resp", None)
+            if getattr(resp, "status", None) == 403 or "403" in str(exc):
+                logger.error("Google Classroom HTTP 403 Forbidden listing courses: %s", sanitized_exc)
+            else:
+                logger.error("Failed to list Google Classroom courses: %s", sanitized_exc)
+            return False
+
+    if not candidate_courses:
+        logger.info("No active courses found. Exiting test without sending email.")
+        return False
+
+    found_assignment = None
+    target_course_name = "Classroom Course"
+
+    for course in candidate_courses:
+        c_id = course.get("id")
+        c_name = course.get("name") or "Unnamed Course"
+        try:
+            cw_res = client.courses().courseWork().list(courseId=c_id, pageSize=10).execute()
+            cw_items = cw_res.get("courseWork", []) if isinstance(cw_res, dict) else []
+            if cw_items and isinstance(cw_items, list):
+                found_assignment = cw_items[0]
+                target_course_name = c_name
+                break
+        except Exception as exc:
+            sanitized_exc = _sanitize_diagnostic_message(str(exc))
+            resp = getattr(exc, "resp", None)
+            if getattr(resp, "status", None) == 403 or "403" in str(exc):
+                logger.error("Google Classroom HTTP 403 Forbidden on course '%s': %s", c_name, sanitized_exc)
+                return False
+            logger.warning("Error checking coursework for course '%s': %s", c_name, sanitized_exc)
+
+    if not found_assignment:
+        logger.info("No assignments found in accessible courses. Exiting test without sending email.")
+        return False
+
+    assignment_title = found_assignment.get("title") or "Assignment"
+
+    # Format due date if available
+    due_date_str = None
+    due_date = found_assignment.get("dueDate")
+    if isinstance(due_date, dict) and "year" in due_date and "month" in due_date and "day" in due_date:
+        due_date_str = f"{due_date['year']}-{due_date['month']:02d}-{due_date['day']:02d}"
+        due_time = found_assignment.get("dueTime")
+        if isinstance(due_time, dict) and "hours" in due_time:
+            hours = due_time.get("hours", 0)
+            minutes = due_time.get("minutes", 0)
+            due_date_str += f" {hours:02d}:{minutes:02d} UTC"
+
+    # 4. Generate notification using Gemini
+    logger.info("Generating test notification using Gemini provider (%s)...", config.llm_provider)
+    try:
+        from classpilot.llm import create_llm_provider
+        from classpilot.events import EventType
+
+        llm = create_llm_provider(config)
+        if hasattr(llm, "generate_test_notification"):
+            notification_text = llm.generate_test_notification(
+                course_name=target_course_name,
+                assignment_title=assignment_title,
+                due_date=due_date_str,
+            )
+        else:
+            notification_text = llm.generate_message(
+                EventType.NEW_ASSIGNMENT,
+                f"{assignment_title} in {target_course_name}"
+            )
+        if not notification_text:
+            raise ValueError("Gemini returned empty notification text")
+    except Exception as exc:
+        sanitized_exc = _sanitize_diagnostic_message(str(exc))
+        logger.error("Gemini notification generation failed: %s", sanitized_exc)
+        return False
+
+    # 5. Send exactly one email via SMTP
+    subject = f"[CLASSPILOT TEST] {target_course_name}: {assignment_title}"
+    body = (
+        f"{notification_text}\n\n"
+        f"---\n"
+        f"Course: {target_course_name}\n"
+        f"Assignment: {assignment_title}\n"
+    )
+    if due_date_str:
+        body += f"Due Date: {due_date_str}\n"
+    body += (
+        f"\n[This is a ClassPilot test notification sent to {recipient_email}. "
+        f"No production state or notification history was modified.]\n"
+    )
+
+    logger.info("Sending test email to %s...", recipient_email)
+    try:
+        from classpilot.notifier import create_notifier
+
+        notifier = create_notifier(config, to_email_override=recipient_email)
+        notifier.send(subject=subject, body=body)
+        logger.info("Successfully sent test notification email to %s.", recipient_email)
+        return True
+    except Exception as exc:
+        sanitized_exc = _sanitize_diagnostic_message(str(exc))
+        logger.error("Failed to send test email via SMTP: %s", sanitized_exc)
+        return False
+
+
 def main() -> None:
     is_dry_run = "--dry-run" in sys.argv
+    is_test_email = "--test-email" in sys.argv
     config = get_config()
     configure_logging(config.log_level)
-    
+
+    if is_test_email:
+        logger.info("Starting ClassPilot in TEST EMAIL mode")
+        recipient = None
+        course_id = None
+        user_id = None
+
+        for idx, arg in enumerate(sys.argv):
+            if arg == "--recipient-email" and idx + 1 < len(sys.argv):
+                recipient = sys.argv[idx + 1]
+            elif arg.startswith("--recipient-email="):
+                recipient = arg.split("=", 1)[1]
+            elif arg == "--course-id" and idx + 1 < len(sys.argv):
+                course_id = sys.argv[idx + 1]
+            elif arg.startswith("--course-id="):
+                course_id = arg.split("=", 1)[1]
+            elif arg == "--user-id" and idx + 1 < len(sys.argv):
+                user_id = sys.argv[idx + 1]
+            elif arg.startswith("--user-id="):
+                user_id = arg.split("=", 1)[1]
+
+        import os
+        if not recipient:
+            recipient = os.getenv("TEST_RECIPIENT_EMAIL")
+        if not course_id:
+            course_id = os.getenv("TEST_COURSE_ID")
+        if not user_id:
+            user_id = os.getenv("TEST_USER_ID")
+
+        if not recipient:
+            logger.error("TEST EMAIL mode requires --recipient-email or TEST_RECIPIENT_EMAIL environment variable.")
+            sys.exit(1)
+            return
+
+        success = run_test_email(config, recipient_email=recipient, course_id=course_id, user_id=user_id)
+        if success:
+            logger.info("Test email mode finished successfully.")
+            sys.exit(0)
+            return
+        else:
+            logger.error("Test email mode failed or found no assignment.")
+            sys.exit(1)
+            return
+
+
     if is_dry_run:
         logger.info("Starting ClassPilot background job in DRY RUN mode")
     else:
         logger.info("Starting ClassPilot background job execution")
-        
+
     state_store = StateStore()
     enabled_users = state_store.get_enabled_watchers()
-    
+
     if not enabled_users:
         logger.info("No users have the watcher enabled. Exiting.")
         return
-        
+
     user_store = UserStore()
-    
+
     for user_id in enabled_users:
         user = user_store.get_user_by_id(user_id)
         if not user:
             logger.warning("User %s is enabled but does not exist in UserStore", user_id)
             continue
-            
+
         try:
             credentials = get_authorized_credentials(user_id, user_store)
         except Exception as exc:
             logger.warning("Could not fetch credentials for user %s: %s", user_id, exc)
             continue
-            
+
         if is_dry_run:
             run_diagnostics(user_id, credentials, config)
         else:
@@ -227,7 +466,7 @@ def main() -> None:
                 services.run_poll_cycle()
             except Exception as exc:
                 logger.error("Poll cycle failed for user %s: %s", user_id, exc, exc_info=True)
-            
+
     if is_dry_run:
         logger.info("Dry run diagnostics complete")
     else:
@@ -236,3 +475,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

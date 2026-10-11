@@ -123,3 +123,59 @@ class GeminiProvider(LLMProvider):
             raise LLMProviderError(
                 f"Gemini generation failed: {sanitized_exc_str}"
             ) from exc
+
+    def generate_test_notification(
+        self,
+        course_name: str,
+        assignment_title: str,
+        due_date: Optional[str] = None,
+    ) -> str:
+        """
+        Generate a short, professional assignment notification for test emails.
+        Contains the course name, assignment title, and due date when available.
+        """
+        due_info = f"Due date: {due_date}." if due_date else "No due date specified."
+        system_instruction = (
+            "You are ClassPilot AI, an intelligent academic assistant. "
+            "Generate a short, professional, and clear assignment notification for a student. "
+            "Must mention the course name, assignment title, and due date. "
+            "Keep the message under 40 words. Do not use quotes or introductory filler."
+        )
+        user_prompt = (
+            f"Course: {course_name}\n"
+            f"Assignment: {assignment_title}\n"
+            f"{due_info}\n"
+        )
+        try:
+            from google.genai import types
+
+            config = types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.7,
+                max_output_tokens=self._max_output_tokens,
+            )
+
+            response = self._client.models.generate_content(
+                model=self._model,
+                contents=user_prompt,
+                config=config,
+            )
+
+            text = response.text if response and hasattr(response, "text") else None
+            message = (text or "").strip().strip('"')
+            if not message:
+                raise LLMProviderError("Gemini returned an empty message.")
+            return message
+
+        except LLMProviderError:
+            raise
+        except Exception as exc:
+            sanitized_exc_str = _sanitize_error_message(str(exc))
+            logger.error("Gemini test notification generation failed: %s", sanitized_exc_str)
+            code = getattr(exc, "code", None)
+            if code == 429 or "RESOURCE_EXHAUSTED" in sanitized_exc_str or "rate limit" in sanitized_exc_str.lower():
+                raise LLMProviderError(f"Gemini API rate limit exceeded: {sanitized_exc_str}") from exc
+            if code == 404 or "NOT_FOUND" in sanitized_exc_str or "not found" in sanitized_exc_str.lower():
+                raise LLMProviderError(f"Gemini model '{self._model}' is unavailable or not found: {sanitized_exc_str}") from exc
+            raise LLMProviderError(f"Gemini generation failed: {sanitized_exc_str}") from exc
+

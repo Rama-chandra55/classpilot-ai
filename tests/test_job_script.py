@@ -695,5 +695,355 @@ class TestJobDiagnostics(unittest.TestCase):
         mock_build.assert_not_called()
 
 
+class TestJobEmailNotificationTest(unittest.TestCase):
+    """
+    Automated regression tests for ClassPilot --test-email mode:
+    1. Exactly one email sent on success with [CLASSPILOT TEST] prefix.
+    2. Optional course_id parameter searches only that course.
+    3. No assignment available exits cleanly with no email sent.
+    4. Invalid recipient email rejects before querying.
+    5. Google Classroom HTTP 403 handled gracefully.
+    6. Gemini generation failure handled gracefully.
+    7. SMTP failure handled gracefully.
+    8. Never modifies notification history or dedup claims.
+    9. Never falls back to production watcher execution.
+    """
+
+    def setUp(self):
+        from classpilot.config import ClassPilotConfig
+        self.config = ClassPilotConfig(
+            llm_provider="gemini",
+            llm_api_key="test-key",
+            llm_model="gemini-2.5-flash-lite",
+            notifier_backend="email",
+            smtp_host="smtp.example.com",
+            smtp_port=587,
+            smtp_user="sender@example.com",
+            smtp_password="password",
+        )
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("googleapiclient.discovery.build")
+    @patch("classpilot.llm.create_llm_provider")
+    @patch("classpilot.notifier.create_notifier")
+    def test_test_email_success_sends_exactly_one_email(
+        self, mock_notifier_factory, mock_llm_factory, mock_build,
+        mock_get_creds, mock_user_store_cls, mock_state_store_cls
+    ):
+        """Exactly one email is sent to recipient_email with [CLASSPILOT TEST] prefix."""
+        from classpilot.job import run_test_email
+
+        mock_state_store = mock_state_store_cls.return_value
+        mock_state_store.get_enabled_watchers.return_value = ["usr-1234"]
+
+        mock_client = MagicMock()
+        mock_build.return_value = mock_client
+        mock_client.courses.return_value.list.return_value.execute.return_value = {
+            "courses": [{"id": "c101", "name": "Calculus", "courseState": "ACTIVE"}]
+        }
+        mock_client.courses.return_value.courseWork.return_value.list.return_value.execute.return_value = {
+            "courseWork": [{
+                "id": "a1",
+                "title": "Midterm Review",
+                "dueDate": {"year": 2026, "month": 10, "day": 15},
+                "dueTime": {"hours": 17, "minutes": 0},
+            }]
+        }
+
+        mock_llm = MagicMock()
+        mock_llm.generate_test_notification.return_value = "Calculus Midterm Review is due on 2026-10-15."
+        mock_llm_factory.return_value = mock_llm
+
+        mock_notifier = MagicMock()
+        mock_notifier_factory.return_value = mock_notifier
+
+        result = run_test_email(self.config, recipient_email="student@example.com")
+
+        self.assertTrue(result)
+        mock_notifier_factory.assert_called_once_with(self.config, to_email_override="student@example.com")
+        mock_notifier.send.assert_called_once()
+        _, kwargs = mock_notifier.send.call_args
+        subject = kwargs["subject"]
+        body = kwargs["body"]
+        self.assertTrue(subject.startswith("[CLASSPILOT TEST]"))
+        self.assertIn("Calculus", subject)
+        self.assertIn("Midterm Review", subject)
+        self.assertIn("Calculus Midterm Review is due on 2026-10-15.", body)
+        self.assertIn("2026-10-15 17:00 UTC", body)
+        self.assertIn("student@example.com", body)
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("googleapiclient.discovery.build")
+    @patch("classpilot.llm.create_llm_provider")
+    @patch("classpilot.notifier.create_notifier")
+    def test_test_email_with_explicit_course_id(
+        self, mock_notifier_factory, mock_llm_factory, mock_build,
+        mock_get_creds, mock_user_store_cls, mock_state_store_cls
+    ):
+        """When course_id is supplied, only that course is fetched via courses().get()."""
+        from classpilot.job import run_test_email
+
+        mock_state_store = mock_state_store_cls.return_value
+        mock_state_store.get_enabled_watchers.return_value = ["usr-1234"]
+
+        mock_client = MagicMock()
+        mock_build.return_value = mock_client
+        mock_client.courses.return_value.get.return_value.execute.return_value = {
+            "id": "c999", "name": "Physics", "courseState": "ACTIVE"
+        }
+        mock_client.courses.return_value.courseWork.return_value.list.return_value.execute.return_value = {
+            "courseWork": [{"id": "a9", "title": "Lab 1"}]
+        }
+
+        mock_llm = MagicMock()
+        mock_llm.generate_test_notification.return_value = "Physics Lab 1 notification."
+        mock_llm_factory.return_value = mock_llm
+
+        mock_notifier = MagicMock()
+        mock_notifier_factory.return_value = mock_notifier
+
+        result = run_test_email(self.config, recipient_email="student@example.com", course_id="c999")
+
+        self.assertTrue(result)
+        mock_client.courses.return_value.get.assert_called_once_with(id="c999")
+        mock_client.courses.return_value.list.assert_not_called()
+        mock_notifier.send.assert_called_once()
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("googleapiclient.discovery.build")
+    @patch("classpilot.llm.create_llm_provider")
+    @patch("classpilot.notifier.create_notifier")
+    def test_test_email_no_assignment_available(
+        self, mock_notifier_factory, mock_llm_factory, mock_build,
+        mock_get_creds, mock_user_store_cls, mock_state_store_cls
+    ):
+        """If no assignment is found, exits clearly without sending any email."""
+        from classpilot.job import run_test_email
+
+        mock_state_store = mock_state_store_cls.return_value
+        mock_state_store.get_enabled_watchers.return_value = ["usr-1234"]
+
+        mock_client = MagicMock()
+        mock_build.return_value = mock_client
+        mock_client.courses.return_value.list.return_value.execute.return_value = {
+            "courses": [{"id": "c101", "name": "Empty Course", "courseState": "ACTIVE"}]
+        }
+        mock_client.courses.return_value.courseWork.return_value.list.return_value.execute.return_value = {
+            "courseWork": []
+        }
+
+        mock_notifier = MagicMock()
+        mock_notifier_factory.return_value = mock_notifier
+
+        result = run_test_email(self.config, recipient_email="student@example.com")
+
+        self.assertFalse(result)
+        mock_notifier.send.assert_not_called()
+        mock_llm_factory.assert_not_called()
+
+    @patch("classpilot.notifier.create_notifier")
+    def test_test_email_invalid_recipient_email(self, mock_notifier_factory):
+        """Invalid recipient email addresses are rejected before any API calls."""
+        from classpilot.job import run_test_email
+
+        invalid_emails = ["not-an-email", "", "   ", "missingdomain@", "@nodomain.com"]
+        for inv in invalid_emails:
+            result = run_test_email(self.config, recipient_email=inv)
+            self.assertFalse(result)
+        mock_notifier_factory.assert_not_called()
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("googleapiclient.discovery.build")
+    @patch("classpilot.notifier.create_notifier")
+    def test_test_email_google_classroom_http_403(
+        self, mock_notifier_factory, mock_build,
+        mock_get_creds, mock_user_store_cls, mock_state_store_cls
+    ):
+        """HTTP 403 on Google Classroom stops execution and sends no email."""
+        from classpilot.job import run_test_email
+
+        mock_state_store = mock_state_store_cls.return_value
+        mock_state_store.get_enabled_watchers.return_value = ["usr-1234"]
+
+        mock_client = MagicMock()
+        mock_build.return_value = mock_client
+        mock_resp = MagicMock(status=403)
+        err = Exception("403 Forbidden")
+        err.resp = mock_resp
+        mock_client.courses.return_value.list.return_value.execute.side_effect = err
+
+        mock_notifier = MagicMock()
+        mock_notifier_factory.return_value = mock_notifier
+
+        result = run_test_email(self.config, recipient_email="student@example.com")
+
+        self.assertFalse(result)
+        mock_notifier.send.assert_not_called()
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("googleapiclient.discovery.build")
+    @patch("classpilot.llm.create_llm_provider")
+    @patch("classpilot.notifier.create_notifier")
+    def test_test_email_gemini_generation_failure(
+        self, mock_notifier_factory, mock_llm_factory, mock_build,
+        mock_get_creds, mock_user_store_cls, mock_state_store_cls
+    ):
+        """Gemini generation failure is caught, logged, and sends no email."""
+        from classpilot.job import run_test_email
+
+        mock_state_store = mock_state_store_cls.return_value
+        mock_state_store.get_enabled_watchers.return_value = ["usr-1234"]
+
+        mock_client = MagicMock()
+        mock_build.return_value = mock_client
+        mock_client.courses.return_value.list.return_value.execute.return_value = {
+            "courses": [{"id": "c101", "name": "Calculus", "courseState": "ACTIVE"}]
+        }
+        mock_client.courses.return_value.courseWork.return_value.list.return_value.execute.return_value = {
+            "courseWork": [{"id": "a1", "title": "Homework"}]
+        }
+
+        mock_llm = MagicMock()
+        mock_llm.generate_test_notification.side_effect = Exception("Gemini API error")
+        mock_llm_factory.return_value = mock_llm
+
+        mock_notifier = MagicMock()
+        mock_notifier_factory.return_value = mock_notifier
+
+        result = run_test_email(self.config, recipient_email="student@example.com")
+
+        self.assertFalse(result)
+        mock_notifier.send.assert_not_called()
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("googleapiclient.discovery.build")
+    @patch("classpilot.llm.create_llm_provider")
+    @patch("classpilot.notifier.create_notifier")
+    def test_test_email_smtp_failure(
+        self, mock_notifier_factory, mock_llm_factory, mock_build,
+        mock_get_creds, mock_user_store_cls, mock_state_store_cls
+    ):
+        """SMTP error during sending returns False cleanly."""
+        from classpilot.job import run_test_email
+
+        mock_state_store = mock_state_store_cls.return_value
+        mock_state_store.get_enabled_watchers.return_value = ["usr-1234"]
+
+        mock_client = MagicMock()
+        mock_build.return_value = mock_client
+        mock_client.courses.return_value.list.return_value.execute.return_value = {
+            "courses": [{"id": "c101", "name": "Calculus", "courseState": "ACTIVE"}]
+        }
+        mock_client.courses.return_value.courseWork.return_value.list.return_value.execute.return_value = {
+            "courseWork": [{"id": "a1", "title": "Homework"}]
+        }
+
+        mock_llm = MagicMock()
+        mock_llm.generate_test_notification.return_value = "Test notification"
+        mock_llm_factory.return_value = mock_llm
+
+        mock_notifier = MagicMock()
+        mock_notifier.send.side_effect = Exception("SMTP connection failure")
+        mock_notifier_factory.return_value = mock_notifier
+
+        result = run_test_email(self.config, recipient_email="student@example.com")
+
+        self.assertFalse(result)
+
+    @patch("classpilot.job.StateStore")
+    @patch("classpilot.job.UserStore")
+    @patch("classpilot.job.get_authorized_credentials")
+    @patch("googleapiclient.discovery.build")
+    @patch("classpilot.llm.create_llm_provider")
+    @patch("classpilot.notifier.create_notifier")
+    def test_test_email_no_changes_to_notification_history(
+        self, mock_notifier_factory, mock_llm_factory, mock_build,
+        mock_get_creds, mock_user_store_cls, mock_state_store_cls
+    ):
+        """Notification claims and history in StateStore are never touched during test email."""
+        from classpilot.job import run_test_email
+
+        mock_state_store = mock_state_store_cls.return_value
+        mock_state_store.get_enabled_watchers.return_value = ["usr-1234"]
+
+        mock_client = MagicMock()
+        mock_build.return_value = mock_client
+        mock_client.courses.return_value.list.return_value.execute.return_value = {
+            "courses": [{"id": "c101", "name": "Calculus", "courseState": "ACTIVE"}]
+        }
+        mock_client.courses.return_value.courseWork.return_value.list.return_value.execute.return_value = {
+            "courseWork": [{"id": "a1", "title": "Homework"}]
+        }
+
+        mock_llm = MagicMock()
+        mock_llm.generate_test_notification.return_value = "Test notification"
+        mock_llm_factory.return_value = mock_llm
+
+        mock_notifier = MagicMock()
+        mock_notifier_factory.return_value = mock_notifier
+
+        run_test_email(self.config, recipient_email="student@example.com")
+
+        # Crucial: verify StateStore mutation methods were NEVER called
+        self.assertFalse(hasattr(mock_state_store, "claim_event") and mock_state_store.claim_event.called)
+        self.assertFalse(hasattr(mock_state_store, "record_notification") and mock_state_store.record_notification.called)
+        mock_state_store.set_watcher_enabled.assert_not_called()
+
+    @patch("classpilot.job.run_test_email", return_value=True)
+    @patch("classpilot.job.build_user_services")
+    @patch("sys.exit")
+    def test_main_test_email_success_exits_0_and_never_runs_watcher(
+        self, mock_exit, mock_build_services, mock_run_test_email
+    ):
+        """When --test-email is passed and succeeds, exits 0 and never triggers watcher."""
+        with patch.object(sys, "argv", ["job.py", "--test-email", "--recipient-email", "test@example.com"]):
+            main()
+
+        mock_run_test_email.assert_called_once()
+        mock_exit.assert_called_once_with(0)
+        mock_build_services.assert_not_called()
+
+    @patch("classpilot.job.run_test_email", return_value=False)
+    @patch("classpilot.job.build_user_services")
+    @patch("sys.exit")
+    def test_main_test_email_failure_exits_1_and_never_runs_watcher(
+        self, mock_exit, mock_build_services, mock_run_test_email
+    ):
+        """When --test-email fails (e.g. no assignments), exits 1 and never falls through to watcher."""
+        with patch.object(sys, "argv", ["job.py", "--test-email", "--recipient-email", "test@example.com"]):
+            main()
+
+        mock_run_test_email.assert_called_once()
+        mock_exit.assert_called_once_with(1)
+        mock_build_services.assert_not_called()
+
+    @patch("classpilot.job.build_user_services")
+    @patch("sys.exit")
+    def test_main_test_email_missing_recipient_exits_1_and_never_runs_watcher(
+        self, mock_exit, mock_build_services
+    ):
+        """When --test-email is passed without recipient, exits 1 and never falls through to watcher."""
+        import os
+        with patch.object(sys, "argv", ["job.py", "--test-email"]), \
+             patch.dict(os.environ, {}, clear=True):
+            main()
+
+        mock_exit.assert_called_once_with(1)
+        mock_build_services.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
+

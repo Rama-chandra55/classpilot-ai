@@ -255,3 +255,29 @@ def test_factory_creates_gemini_provider():
         assert isinstance(provider, GeminiProvider)
         assert provider._model == "gemini-2.5-flash-lite"
         assert provider._max_output_tokens == DEFAULT_MAX_OUTPUT_TOKENS
+
+
+def test_gemini_provider_generate_test_notification():
+    """Verify generate_test_notification formats prompt with course, title, due date."""
+    with patch("google.genai.Client") as mock_client_cls:
+        mock_client = Mock()
+        mock_client_cls.return_value = mock_client
+
+        mock_response = Mock()
+        mock_response.text = '  "Calculus Assignment 1 is due tomorrow."  \n'
+        mock_client.models.generate_content.return_value = mock_response
+
+        provider = GeminiProvider(api_key="test-key")
+        result = provider.generate_test_notification(
+            course_name="Calculus",
+            assignment_title="Assignment 1",
+            due_date="2026-10-15 23:59 UTC",
+        )
+
+        assert result == "Calculus Assignment 1 is due tomorrow."
+        _, kwargs = mock_client.models.generate_content.call_args
+        assert "Calculus" in kwargs["contents"]
+        assert "Assignment 1" in kwargs["contents"]
+        assert "2026-10-15 23:59 UTC" in kwargs["contents"]
+        assert kwargs["config"].temperature == 0.7
+
