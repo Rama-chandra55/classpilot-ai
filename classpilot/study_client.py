@@ -140,15 +140,21 @@ def _paginate(list_fn, item_key: str, params: dict) -> list[dict]:
     """
     items: list[dict] = []
     page_token: Optional[str] = None
+    seen_tokens = set()
     while True:
         call_params = dict(params)
         if page_token:
             call_params["pageToken"] = page_token
         result = list_fn(**call_params).execute()
-        items.extend(result.get(item_key) or [])
-        page_token = result.get("nextPageToken")
-        if not page_token:
+        if not isinstance(result, dict):
             break
+        page_items = result.get(item_key)
+        if isinstance(page_items, list):
+            items.extend(page_items)
+        page_token = result.get("nextPageToken")
+        if not page_token or not isinstance(page_token, str) or page_token in seen_tokens:
+            break
+        seen_tokens.add(page_token)
     return items
 
 

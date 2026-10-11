@@ -395,6 +395,24 @@ class TestPaginateHelper(unittest.TestCase):
         sc._paginate(list_fn, "items", base_params)
         self.assertNotIn("pageToken", base_params)
 
+    def test_handles_mock_and_non_dict_results_without_infinite_loop(self):
+        """Mock or non-dict API response objects must break immediately without looping infinitely."""
+        list_fn = MagicMock()
+        # By default list_fn().execute() returns a MagicMock
+        result = sc._paginate(list_fn, "items", {})
+        self.assertEqual(result, [])
+
+    def test_handles_non_string_or_cyclic_page_token(self):
+        """Page tokens must be strings and must not repeat cyclically."""
+        list_fn = MagicMock()
+        list_fn.return_value.execute.side_effect = [
+            {"items": [{"id": 1}], "nextPageToken": "TOKEN1"},
+            {"items": [{"id": 2}], "nextPageToken": "TOKEN1"},  # cyclic repetition
+        ]
+        result = sc._paginate(list_fn, "items", {})
+        self.assertEqual(len(result), 2)
+
+
 
 class TestNormaliseMaterial(unittest.TestCase):
     def test_drive_attachment_extracted(self):

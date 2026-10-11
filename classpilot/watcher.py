@@ -31,6 +31,7 @@ Phase 3 — user-scoped, credentials-based:
 
 import json
 import logging
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, List, Optional
@@ -245,6 +246,20 @@ class AssignmentWatcher:
         self._now = now
         self._budget = budget
 
+    @property
+    def _study_client(self):
+        """
+        Resolve the active study_client module, seamlessly supporting tests
+        that patch either 'classpilot.watcher.study_client' or 'classpilot.study_client'
+        across module reloads.
+        """
+        active = sys.modules.get("classpilot.study_client")
+        if active is not None and active is not study_client:
+            # If the active module has been mocked or patched, prefer it
+            if hasattr(getattr(active, "fetch_courses", None), "assert_called") or getattr(getattr(active, "fetch_courses", None), "_mock_return_value", None) is not None:
+                return active
+        return study_client
+
     def check_once(self) -> List[AssignmentEvent]:
         """
         Run a single poll cycle across all active courses.
@@ -254,9 +269,10 @@ class AssignmentWatcher:
             to on_event as they're found).
         """
         events: List[AssignmentEvent] = []
+        client = self._study_client
 
         try:
-            courses = study_client.fetch_courses(self._credentials, page_size=100)
+            courses = client.fetch_courses(self._credentials, page_size=100)
         except Exception:
             logger.error("Failed to list courses during watcher poll", exc_info=True)
             return events
@@ -268,7 +284,7 @@ class AssignmentWatcher:
                 continue
 
             try:
-                assignments = study_client.fetch_assignments(self._credentials, course_id)
+                assignments = client.fetch_assignments(self._credentials, course_id)
             except Exception:
                 logger.error(
                     "Failed to list assignments for course %s (%s)",

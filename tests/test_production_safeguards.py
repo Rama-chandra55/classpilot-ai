@@ -22,6 +22,7 @@ import sys
 import threading
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
@@ -33,6 +34,23 @@ from classpilot.job import main
 from classpilot.services import build_user_services
 from classpilot.state_store import ReadOnlyStateStore, StateStore
 from classpilot.watcher import AssignmentEvent, AssignmentWatcher
+
+
+@contextmanager
+def patch_study_api(courses=None, assignments=None):
+    """
+    Robustly patches study_client endpoints on both classpilot.watcher.study_client
+    and classpilot.study_client to guarantee test isolation across module reloads.
+    """
+    if courses is None:
+        courses = [{"id": "course-1"}]
+    if assignments is None:
+        assignments = []
+    with patch("classpilot.watcher.study_client.fetch_courses", return_value=courses), \
+         patch("classpilot.watcher.study_client.fetch_assignments", return_value=assignments), \
+         patch("classpilot.study_client.fetch_courses", return_value=courses), \
+         patch("classpilot.study_client.fetch_assignments", return_value=assignments):
+        yield
 
 
 class InMemoryTestStore(StateStore):
@@ -496,8 +514,7 @@ class TestGlobalNotificationCap(unittest.TestCase):
             for i in range(5)
         ]
 
-        with patch("classpilot.study_client.fetch_courses", return_value=[{"id": "course-1"}]), \
-             patch("classpilot.study_client.fetch_assignments", return_value=mock_assignments):
+        with patch_study_api(assignments=mock_assignments):
             watcher.check_once()
 
         # Exactly 2 were delivered, 3 deferred
@@ -527,8 +544,7 @@ class TestGlobalNotificationCap(unittest.TestCase):
             budget=fresh_budget,
         )
 
-        with patch("classpilot.study_client.fetch_courses", return_value=[{"id": "course-1"}]), \
-             patch("classpilot.study_client.fetch_assignments", return_value=mock_assignments):
+        with patch_study_api(assignments=mock_assignments):
             watcher2.check_once()
 
         self.assertEqual(len(dispatched_second), 3)
@@ -610,15 +626,13 @@ class TestGlobalNotificationCap(unittest.TestCase):
         assignments_a = [{"id": "a-1", "title": "A1"}, {"id": "a-2", "title": "A2"}]
         assignments_b = [{"id": "b-1", "title": "B1"}, {"id": "b-2", "title": "B2"}]
 
-        with patch("classpilot.study_client.fetch_courses", return_value=[{"id": "course-1"}]), \
-             patch("classpilot.study_client.fetch_assignments", return_value=assignments_a):
+        with patch_study_api(assignments=assignments_a):
             w_a.check_once()
 
         self.assertEqual(len(delivered_a), 2)
         self.assertEqual(budget.remaining, 1)
 
-        with patch("classpilot.study_client.fetch_courses", return_value=[{"id": "course-1"}]), \
-             patch("classpilot.study_client.fetch_assignments", return_value=assignments_b):
+        with patch_study_api(assignments=assignments_b):
             w_b.check_once()
 
         # User B gets 1, and 1 deferred because global cap was 3!
@@ -654,8 +668,7 @@ class TestSafeRetryOnDeliveryFailure(unittest.TestCase):
 
         assignment = [{"id": "assign-retry-1", "title": "Math Quiz", "dueDate": {"year": 2026, "month": 11, "day": 1}}]
 
-        with patch("classpilot.study_client.fetch_courses", return_value=[{"id": "course-1"}]), \
-             patch("classpilot.study_client.fetch_assignments", return_value=assignment):
+        with patch_study_api(assignments=assignment):
             # Attempt 1 fails
             watcher.check_once()
 
@@ -667,8 +680,7 @@ class TestSafeRetryOnDeliveryFailure(unittest.TestCase):
 
         # Attempt 2 succeeds
         fail_email = False
-        with patch("classpilot.study_client.fetch_courses", return_value=[{"id": "course-1"}]), \
-             patch("classpilot.study_client.fetch_assignments", return_value=assignment):
+        with patch_study_api(assignments=assignment):
             watcher.check_once()
 
         rec = self.store.get_known_assignment("course-1", "assign-retry-1", self.user_id)
@@ -698,8 +710,7 @@ class TestSafeRetryOnDeliveryFailure(unittest.TestCase):
         new_due = {"year": 2026, "month": 10, "day": 25}
         assignment = [{"id": "assign-upd", "title": "Project", "dueDate": new_due}]
 
-        with patch("classpilot.study_client.fetch_courses", return_value=[{"id": "course-1"}]), \
-             patch("classpilot.study_client.fetch_assignments", return_value=assignment):
+        with patch_study_api(assignments=assignment):
             # Attempt 1 fails
             watcher.check_once()
 
@@ -710,8 +721,7 @@ class TestSafeRetryOnDeliveryFailure(unittest.TestCase):
 
         # Attempt 2 succeeds
         fail_email = False
-        with patch("classpilot.study_client.fetch_courses", return_value=[{"id": "course-1"}]), \
-             patch("classpilot.study_client.fetch_assignments", return_value=assignment):
+        with patch_study_api(assignments=assignment):
             watcher.check_once()
 
         rec = self.store.get_known_assignment("course-1", "assign-upd", self.user_id)
