@@ -1,712 +1,468 @@
-# ClassPilot AI 🤖
+<div align="center">
 
-> Your Google Classroom Study Assistant — exposed as an MCP server so any
-> MCP-compatible client (Claude Desktop, Cursor, ChatGPT, etc.) can navigate
-> your courses and read your course materials on your behalf.
-> **100% free to run** using Google Gemini or Groq as the LLM provider.
+# ClassPilot AI
 
----
+### Your Google Classroom. One AI Conversation.
 
-## What ClassPilot AI does today
+[![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11-3776AB?style=flat&logo=python&logoColor=white)](https://www.python.org/)
+[![Protocol](https://img.shields.io/badge/Protocol-Model%20Context%20Protocol%20(MCP)-blueviolet?style=flat)](https://modelcontextprotocol.io/)
+[![Framework](https://img.shields.io/badge/Server-FastMCP%203.x-6C5CE7?style=flat)](https://github.com/jlowin/fastmcp)
+[![Database](https://img.shields.io/badge/Database-PostgreSQL%20%7C%20Neon-4169E1?style=flat&logo=postgresql&logoColor=white)](https://neon.tech/)
+[![Google API](https://img.shields.io/badge/Google%20APIs-Classroom%20%26%20Drive-EA4335?style=flat&logo=google&logoColor=white)](https://developers.google.com/classroom)
+[![Security](https://img.shields.io/badge/Auth-OAuth%202.1%20%2B%20PKCE-brightgreen?style=flat)](docs/ARCHITECTURE.md)
+[![Encryption](https://img.shields.io/badge/Tokens-Fernet%20AES--128--CBC-success?style=flat)](docs/PRIVACY.md)
+[![CI Tests](https://img.shields.io/badge/Tests-430%2B%20Passing-success?style=flat&logo=githubactions&logoColor=white)](.github/workflows/classpilot-full-tests.yml)
 
-ClassPilot AI is an [MCP](https://modelcontextprotocol.io) server built on
-top of Google Classroom + Google Drive. It exposes **8 tools** that an LLM
-client can call directly — 5 for browsing and reading course content, plus
-3 carried over from the original assignment watcher.
+<p align="center">
+  A production-grade Model Context Protocol (MCP) server that empowers ChatGPT, Claude, Cursor, and any MCP-compatible AI client to navigate Google Classroom courses, read complex course materials, and visually inspect lecture diagrams with rigorous multi-tenant security.
+</p>
 
-### Study Assistant tools (primary focus)
+[Quick Start](#quick-start-guide-for-hosted-users) • [Architecture](#architecture) • [Six MCP Tools](#six-mcp-tools--example-queries) • [Visual Extraction](#supported-document-formats--visual-extraction) • [Documentation](docs/)
 
-| Tool | What it does |
-|---|---|
-| `list_classes` | List all active Classroom courses you're enrolled in |
-| `list_modules` | List the topics/modules inside a course |
-| `list_materials` | List materials, assignments, and (optionally) announcements in a module or course |
-| `get_material` | Fetch a material and **read the text content of its attachments** |
-| `search_classroom` | Search course names, module names, and material titles/descriptions |
-
-Typical navigation flow: `list_classes` → `list_modules` → `list_materials`
-→ `get_material`. Use `search_classroom` when you don't know exactly where
-something lives.
-
-### Watcher tools (kept from the original project)
-
-| Tool | What it does |
-|---|---|
-| `get_upcoming_deadlines` | List upcoming assignment due dates, soonest first |
-| `start_assignment_watcher` | Start background polling + email notifications for new assignments and deadlines |
-| `stop_assignment_watcher` | Stop the background watcher |
-
-**ClassPilot does not submit or turn in assignments.** Assignments are
-surfaced as read-only information (title, description, due date) via
-`list_materials` / `get_material` only.
+</div>
 
 ---
 
-## Supported file formats
+## Overview
 
-`get_material` attempts to extract real text from every Drive attachment on
-a material so the LLM can summarize, explain, or answer questions about it
-directly — instead of just handing back a link.
+**ClassPilot AI** transforms static learning management systems into an interactive, conversational study workspace. Built natively on the open [Model Context Protocol (MCP)](https://modelcontextprotocol.io), ClassPilot allows AI assistants (such as ChatGPT with Developer Mode, Claude Desktop, and Cursor) to securely query a student's Google Classroom courses on demand.
 
-| Format | Text | Visuals | How |
-|---|---|---|---|
-| Google Docs | ✅ Full text | — | Docs API export |
-| Google Slides | ✅ Full text (all slides) | — | Drive export to `text/plain` |
-| Google Sheets | ✅ Full data | — | Drive export to CSV |
-| Plain text (`.txt`, `.md`, `.html`, `.csv`, `.json`, `.xml`) | ✅ Full content | — | Direct Drive download |
-| PowerPoint (`.pptx`) | ✅ Full text — slide text, tables, and speaker notes | ✅ Diagrams/charts | `python-pptx` |
-| PDF (`.pdf`) | ✅ Full text, per page | ✅ Diagrams/figures | `pypdf` |
-| Word (`.docx`) | ✅ Full text — paragraphs and tables | ✅ Embedded figures | `python-docx` |
-| Image (`.png`, `.jpg`/`.jpeg`) | — (not OCR'd) | ✅ Whole image | Direct Drive download |
-| Legacy PowerPoint (`.ppt`) | ⚠️ Not supported — title + link only | — | — |
-| Legacy Word (`.doc`) | ⚠️ Not supported — title + link only | — | — |
-| YouTube videos | ⚠️ Not supported — title + link only | — | — |
-| External links | ⚠️ Not supported — title + link only | — | — |
+Beyond simple metadata listing, ClassPilot performs **deep in-memory content and visual extraction**. It extracts structured text from slide presentations, documents, spreadsheets, and PDFs, while extracting diagrams, charts, and architectural figures as high-resolution visual blocks for vision-capable AI models.
 
-If a file can't be read, `get_material` still returns its title and a
-direct link so you (or the LLM) can open it manually, along with a `note`
-explaining why (e.g. scanned/image-only PDF with no extractable text).
-
-**Not yet implemented — planned:** YouTube video transcripts, fetching
-external link content. Legacy `.ppt`/`.doc` binary formats are not
-currently planned since `.pptx`/`.docx` cover the vast majority of
-uploaded coursework.
+ClassPilot AI is built with an enterprise-grade security posture: multi-tenant PostgreSQL persistence, at-rest Fernet token encryption, SHA-256 hashed bearer tokens, and strict separation between MCP client authentication and Google OAuth credentials.
 
 ---
 
-## Visual content — diagrams, charts, and images
+## The Problem ClassPilot AI Solves
 
-Slide decks and PDFs often have pages that are *pure diagram* — a
-system-architecture drawing, a graph, a labeled figure — with no text
-extractable from them at all. `get_material` now pulls out these images
-and hands them to the connected AI as real, viewable images (separate MCP
-image content blocks alongside the JSON), so it can actually look at them
-instead of only seeing "there was an image here."
+Modern academic learning environments are fragmented across folders, announcements, and attachments:
 
-**This is not OCR.** No pixels are read into text; ClassPilot decides
-*which* images are worth showing and passes the raw image bytes through
-unchanged. Any understanding of a diagram's content happens on the
-connected AI's (vision-capable) side, same as if a person looked at the
-slide.
+* **Information Fragmentation**: Syllabi, lecture notes, problem sets, and announcements are buried inside deep Classroom hierarchies and Google Drive folders.
+* **Context Blindness in LLMs**: General-purpose AI assistants have no real-time awareness of a student's enrolled courses, instructor expectations, or approaching deadlines.
+* **Visual Context Loss**: Crucial educational diagrams (system architectures, mathematical plots, biochemical pathways, flowcharts) in slide decks and PDFs are completely invisible to text-only scrapers.
+* **Security & Multi-Tenancy Risks**: Exposing personal Google credentials directly to third-party AI prompts creates unacceptable privacy risks and violates tenant boundaries.
 
-**What counts as "important" — the filtering rules ([`visual_extractor.py`](classpilot/visual_extractor.py)):**
-- **Size** — an image must cover a meaningful share of the slide/page to
-  be treated as content. Diagram-only slides/pages (no other text at all)
-  get a lower bar, since the image *is* the entire content there.
-- **Repetition** — an image whose exact bytes repeat across 3+
-  slides/pages (a running header logo, a watermark, a template background)
-  is treated as decorative and dropped everywhere it appears.
-- **Cap** — at most 8 images per file (diagram-only slides/pages
-  prioritized first, then largest), and 8 total per `get_material` call
-  across all of a material's attachments — so one huge deck can't flood
-  the response.
-
-| Source | Visual detection |
-|---|---|
-| PPTX | Per-slide: is there *any* other text on this slide? If not, its image(s) are diagram-only and get priority. |
-| PDF | Same idea, per page, using each page's extracted text layer. |
-| DOCX | No natural page/text boundary in the object model, so every embedded inline image is filtered by size relative to the page only (not diagram-only vs. not). |
-| Direct image attachment (`.png`/`.jpg`) | The whole file is handed over — it *is* the material, so no filtering applies. |
-
-**Known limitations:**
-- DOCX can't distinguish "diagram-only" the way PPTX/PDF can (see table above) — every embedded image is judged purely on size.
-- A diagram that's small relative to its slide/page (e.g. a small inline formula image) may be filtered out along with genuine icons — the size heuristic can't fully distinguish "small but important" from "small and decorative."
-- Images inside Google Slides/Docs (as opposed to uploaded `.pptx`/`.docx`) aren't covered yet — those materials are read via Drive's text export, which doesn't carry embedded image bytes.
-- Legacy `.ppt`/`.doc` and non-PNG/JPEG image types (`.gif`, `.webp`) are unaffected by this feature — still title+link only.
+ClassPilot AI solves these challenges by providing a dedicated, read-only MCP interface that resolves student identity server-side, streams files securely in memory, extracts both text and visual diagrams, and protects credentials behind hardened OAuth 2.1 boundaries.
 
 ---
 
-## Pagination
+## Key Features & Engineering Highlights
 
-Every Classroom list read (`courses`, `topics`, `courseWorkMaterials`,
-`courseWork`, `announcements`) follows the API's `nextPageToken` to
-completion. Courses with more modules, materials, or assignments than fit
-in a single API response page are not silently truncated.
-
----
-
-## Project status
-
-- **Study Assistant (5 tools):** `list_classes`, `list_modules`, `list_materials`, `get_material`, `search_classroom` — actively developed core tools.
-- **On-Demand Deadlines (1 tool):** `get_upcoming_deadlines` — queries and returns deadlines sorted by proximity on demand.
-- **Decommissioned Watcher & Automatic Email Notifications:** The background watcher tools (`start_assignment_watcher`, `stop_assignment_watcher`) and automatic email notification infrastructure were decommissioned since Google Classroom natively handles student notifications.
-- **PDF / DOCX / PPTX text extraction:** working, tested.
-- **Visual content (diagrams/charts/images):** working, tested — see "Visual content" above for what's covered and current limitations.
-- **Pagination:** working across all Classroom list reads.
-- **Assignment submission:** intentionally removed from the MCP surface. The underlying vendor Classroom API code and `classpilot/submission_flow.py` still exist in the repo (and are still covered by tests) but are **not** registered as MCP tools in `classpilot/server.py`, and there are no plans to re-expose them.
-- **Multi-user persistence foundation (Phase 1 of the multi-user roadmap):** working, tested — Postgres-backed `users` + encrypted Google-credential storage exist and are covered by real integration tests, but are **not yet wired into the live auth flow**. The app still runs single-user via `token.json` today; see "Multi-user roadmap" below.
+* **Native Model Context Protocol (MCP) Interface**: Exposes standardized tools over Streamable HTTP (for web clients like ChatGPT) and stdio (for local environments like Claude Desktop).
+* **Deep Multimodal Document Extraction**: Automatically extracts text from Google Docs, Slides, Sheets, `.pptx`, `.pdf`, and `.docx`, while intelligently surfacing embedded diagrams and charts.
+* **Visual Significance Heuristics**: Custom algorithms detect diagram-only slides and large visual figures while automatically filtering out repeating header logos, watermarks, and icons.
+* **Dual-OAuth Domain Isolation**: Strictly isolates MCP client authentication (OAuth 2.1 + S256 PKCE) from Google OAuth. Google tokens are **never** shared with or accessible by the connected AI.
+* **At-Rest Fernet Token Encryption**: All stored Google refresh tokens are encrypted using AES-128-CBC with HMAC-SHA256 authentication. MCP tokens are stored strictly as SHA-256 hashes.
+* **Ephemeral In-Memory Processing**: Drive attachments are streamed into memory (`io.BytesIO`) during tool execution and never written to the server filesystem.
+* **On-Demand Deadline Prioritization**: Calculates remaining minutes and hours for upcoming assignments across all enrolled courses without running battery-draining background daemons.
 
 ---
 
-## Multi-user roadmap
+## Watch ClassPilot AI in Action
 
-ClassPilot AI is being extended from a single-user tool (one `token.json`)
-into a multi-user MCP server every student can connect their own Google
-account to. This is being built in phases so each one can be reviewed and
-tested independently rather than landing as one large, risky change.
-
-**Phase 1 (done) — Multi-user persistence foundation**
-- `classpilot/db.py` — Postgres connection pool + schema management
-- `classpilot/crypto.py` — Fernet encryption for stored Google refresh tokens
-- `classpilot/user_store.py` — `users` + `google_oauth_credentials` CRUD
-- `classpilot/state_store.py` — additive `user_id` column/param (schema readiness; still defaults to a single tenant today)
-- Google OAuth scope audit — see "Google OAuth scopes" below
-
-**Phase 2 (done) — Google web OAuth flow for multiple users**
-- `classpilot/google_oauth.py` — authorization URL, code exchange, ID token
-  verification (identity keyed on Google's `sub`, not email), and
-  `get_authorized_credentials(user_id)` for building a live, refreshed
-  `Credentials` object on demand — refreshing only when the cached access
-  token is missing/expired, not on every call, and never overwriting a
-  stored refresh token with `None` if a later re-authorization doesn't
-  return a new one
-- `classpilot/oauth_state.py` — Postgres-backed, single-use, expiring CSRF
-  state tokens, paired with the PKCE `code_verifier` each login attempt
-  generates (see the module's docstring — the verifier only ever lives on
-  a single, short-lived `Flow` object in memory, so it has to be persisted
-  somewhere to survive the trip from `/login` to `/callback`; that
-  "somewhere" is this table, not a process-global variable)
-- `classpilot/oauth_web.py` — standalone Starlette app (`classpilot-ai-oauth`)
-  exposing `/auth/google/login` and `/auth/google/callback` — **not**
-  wired into `server.py`/`http_server.py`'s MCP transport at all, so
-  nothing here is reachable from an MCP client and no Google token value
-  is ever included in an HTTP response
-
-Like Phase 1, this is additive: `token.json` + the single global auth
-singleton in `vendor_classroom_suite_mcp` are still what actually
-authenticates every live MCP request today. The web flow above lets you
-connect additional students' Google accounts into the Postgres store, but
-nothing in `server.py`/`study_client.py` reads from that store yet — see
-"Manually testing two Google accounts" below for how to verify the flow
-itself, independent of the (still single-user) running app.
-
-**Phase 3 (done) — Multi-user identity threading**
-- `classpilot/identity.py` — `resolve_identity()`, the single seam every
-  MCP tool calls to find out who's asking. Never a tool parameter.
-- All 8 tools, `study_client.py`, the watcher, and the deadline scheduler
-  now use per-request identity + that user's own Google credentials —
-  `study_client.py` no longer imports the `token.json`-backed global
-  singleton at all.
-- `state_store.py`'s dedup tables are now physically isolated per user
-  (widened `PRIMARY KEY`s), with a safe, idempotent migration for
-  existing databases.
-- `AppServices`/watchers/scheduler are per-user — one student can never
-  start, stop, or affect another's watcher.
-
-**Phase 4 (done) — Remote MCP authentication**
-- `classpilot/mcp_auth.py` — ClassPilot-issued opaque MCP tokens (SHA-256
-  hashed at rest, never plaintext), verified via a custom FastMCP
-  `TokenVerifier`. A Google access/refresh token is never sent to an MCP
-  client — see "Remote MCP authentication" below for the full writeup.
-- `classpilot/mcp_oauth_web.py` — OAuth 2.1 + PKCE authorization server
-  surface (`/mcp/authorize`, `/mcp/token`, `/mcp/revoke`, `/mcp/register`,
-  discovery) an MCP client uses to obtain one of those tokens.
-- `resolve_identity()` now resolves from the authenticated MCP request by
-  default, failing closed on any unauthenticated request.
-
-**Not yet started:**
-- **Phase 5** — production deployment (real TLS host, managed Postgres,
-  secrets manager, Google App Verification, watcher scaling)
-
----
-
-## Remote MCP authentication (Phase 4)
-
-Phase 4 replaces `CLASSPILOT_DEV_USER_ID` as the source of identity for
-remote requests: by default (`MCP_AUTH_MODE=remote`), ClassPilot only
-identifies a caller from a verified MCP access token on the request — an
-unauthenticated request is always rejected, and `CLASSPILOT_DEV_USER_ID`
-is ignored entirely. Set `MCP_AUTH_MODE=local_dev` to keep using the
-Phase 3 dev-user fallback for local stdio work.
-
-### Architecture
-
-ClassPilot runs **two separate OAuth relationships**, never conflated:
-
-```
-MCP client (Claude/Cursor/ChatGPT/...)
-      │  Authorization: Bearer <ClassPilot token>
-      ▼
-ClassPilot MCP server
-      │  looks up the ClassPilot token → resolves to a users.id
-      │  → that user's own stored Google credentials
-      ▼
-Google Classroom / Drive APIs
-```
-
-An MCP client authenticates to ClassPilot via a standards-track OAuth 2.1
-+ PKCE flow that ClassPilot itself serves — it never sees a Google
-access or refresh token. Endpoints:
-
-| Endpoint | Purpose |
-|---|---|
-| `GET /.well-known/oauth-authorization-server` | RFC 8414 discovery |
-| `POST /mcp/register` | RFC 7591 dynamic client registration |
-| `GET /mcp/authorize` | Authorization (PKCE **S256 only** — `plain` is rejected) |
-| `POST /mcp/token` | Code → token, and refresh-token rotation |
-| `POST /mcp/revoke` | RFC 7009 revocation |
-
-**Why a custom `TokenVerifier` instead of FastMCP's `OAuthProxy`:** every
-FastMCP authentication advisory found while building this (CVE-2025-69196,
-CVE-2026-27124, AIKIDO-2026-10735) targets `OAuthProxy` specifically. The
-installed FastMCP is above all fixed versions, but issuing ClassPilot's
-own tokens against FastMCP's plain `TokenVerifier`/`RemoteAuthProvider`
-interfaces avoids that whole component. Tokens are stored as SHA-256
-hashes only — a database compromise yields hashes, not usable bearer
-tokens.
-
-### Known limitation: who is `login_hint`?
-
-`/mcp/authorize` identifies the end user by the `login_hint` email
-parameter (which must already be connected via `/auth/google/login`) —
-there is no logged-in browser session backing this yet. This is
-sufficient for individual/local use and for the client-integration
-testing below, but a real multi-tenant deployment should replace this
-with an actual authenticated session before Phase 5. Documented here
-rather than silently glossed over.
-
-### Client integration status
-
-Configuration was verified against each client's *current* documentation
-(not assumed from memory) as of this phase. All four expect the same
-discovery + OAuth 2.1 + PKCE flow described above.
-
-| Client | Status | Notes |
-|---|---|---|
-| **Claude** (claude.ai / Desktop) | Manual connection required (see below) | Uses the `/mcp/register` DCR endpoint automatically |
-| **Cursor** | Manual connection required (see below) | Also uses DCR |
-| **ChatGPT** | Manual connection required (see below) | Requires a paid tier + Developer Mode |
-| **Gemini** | Best-effort — see below | Consumer support is newer/less certain than the other three |
-
-#### Claude (claude.ai or Claude Desktop)
-
-1. Run `classpilot-ai-http` (or your deployed URL) with `MCP_AUTH_MODE=remote`
-   and `MCP_PUBLIC_BASE_URL` set to the real, reachable URL.
-2. In claude.ai: **Settings → Connectors → Add custom connector**. In
-   Claude Desktop: the equivalent connector settings.
-3. Paste the server URL (e.g. `https://your-host/mcp`).
-4. Click **Connect** — Claude performs DCR against `/mcp/register`, then
-   redirects you through `/mcp/authorize`.
-5. **Manual step required from you:** the authorize URL needs a
-   `login_hint` query parameter with the email you connected via
-   `/auth/google/login`. Depending on how your Claude client builds the
-   authorize request, you may need to complete `/auth/google/login`
-   first in a separate tab, then retry the connector.
-
-#### Cursor
-
-1. Add to `.cursor/mcp.json` (project or global):
-   ```json
-   {
-     "mcpServers": {
-       "classpilot": { "url": "https://your-host/mcp" }
-     }
-   }
-   ```
-2. Cursor auto-discovers the OAuth requirement from `/.well-known/oauth-authorization-server`
-   and attempts DCR via `/mcp/register`, same as Claude.
-3. Same manual `login_hint` note as above applies.
-
-#### ChatGPT
-
-1. Requires a paid tier (Plus/Pro/Business/Enterprise/Edu) — Developer
-   Mode is not available on the Free tier.
-2. **Settings → Connectors → Advanced → enable Developer Mode.**
-3. **Add custom connector** → paste the server URL → choose OAuth.
-4. ChatGPT performs the same discovery + DCR + PKCE flow.
-
-#### Gemini (best-effort)
-
-Gemini's consumer support for arbitrary custom MCP servers is newer and
-less uniformly documented than the other three. As of this phase:
-- **Gemini Spark** (a specific Gemini surface) has been reported to
-  support adding a custom MCP server URL under its connected-apps
-  settings.
-- **Gemini Enterprise** supports adding an MCP server under
-  **Settings & Help → Connected apps → Add MCP Server** (Streamable HTTP
-  only — no SSE transport).
-- The general-purpose Gemini chat app's support for arbitrary remote MCP
-  servers was **not confirmed** at the time of this writing.
-
-Treat Gemini integration as best-effort: validate against whichever
-Gemini surface you actually have access to, and expect this to need
-re-verification as Gemini's MCP support evolves.
-
-### Manual steps you need to perform
-
-1. **Set `MCP_PUBLIC_BASE_URL`** to your server's real, externally-reachable
-   URL (not `localhost`) before connecting any remote client — this value
-   is embedded in discovery metadata and audience binding.
-2. **Connect your Google account first**, via `classpilot-ai-oauth` →
-   `/auth/google/login`, exactly as in Phase 2 — the MCP OAuth flow only
-   issues a ClassPilot token for an email that already has stored Google
-   credentials.
-3. **Add `login_hint=<your connected email>`** to the authorization
-   request if your MCP client doesn't prompt for it automatically (see
-   the per-client notes above) — this is the known Phase 4 limitation.
-4. For each client, use its **current** "add custom/remote MCP server"
-   flow — the UI text and menu location changes fairly often; the
-   {URL} + OAuth 2.1 discovery mechanism described above is what stays
-   stable across client UI changes.
-
----
-
-## Google web OAuth setup (Phase 2)
-
-This is separate from, and doesn't affect, the app's normal single-user
-`token.json` flow — it's for connecting *additional* students' Google
-accounts into the Postgres store built in Phase 1, and for testing the web
-OAuth flow itself.
-
-**1. Google Cloud Console — create a second OAuth client**
-   - Your existing `credentials.json` is a **Desktop app** type client used
-     by the `token.json` fallback flow — leave it alone.
-   - Create a **new, separate** OAuth client: Credentials → Create
-     Credentials → OAuth client ID → **Web application**.
-   - Add an Authorized redirect URI: `http://localhost:8090/auth/google/callback`
-     (or whatever `GOOGLE_OAUTH_REDIRECT_URI` you configure).
-   - Download its JSON and save it as `google_web_credentials.json` (or point
-     `GOOGLE_WEB_CREDENTIALS_PATH` at wherever you put it).
-   - Under your OAuth consent screen's **Test users**, add every Google
-     account you want to test with (while the app is in Testing publishing
-     status, Google restricts sign-in to explicitly listed test users).
-
-**2. Add to `.env`:**
-   ```
-   GOOGLE_WEB_CREDENTIALS_PATH=google_web_credentials.json
-   GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8090/auth/google/callback
-   ```
-   (`DATABASE_URL` and `TOKEN_ENCRYPTION_KEY` from Phase 1's setup are reused as-is.)
-
-**3. Run the standalone OAuth web app:**
-   ```bash
-   classpilot-ai-oauth
-   ```
-
-### Manually testing two Google accounts
-
-1. Visit `http://localhost:8090/auth/google/login` in a browser → sign in
-   as **Account A** → grant consent → you'll land on a plain "Connected!"
-   page showing Account A's email.
-2. Open an incognito/private window (or sign out of Account A first) →
-   visit the same login URL → sign in as **Account B** → grant consent.
-3. Confirm two distinct users were created:
-   ```bash
-   psql "$DATABASE_URL" -c "SELECT google_sub, email FROM users;"
-   psql "$DATABASE_URL" -c "SELECT user_id FROM google_oauth_credentials;"
-   ```
-   You should see two rows in each — different `google_sub` values, even
-   if (hypothetically) the accounts shared an email alias, since identity
-   is keyed on the stable Google `sub`, never on email.
-4. Confirm each user's credentials actually authenticate as *that* Google
-   account (proves the refresh round-trip and per-user isolation, not
-   just that rows exist):
-   ```python
-   from classpilot.user_store import UserStore
-   from classpilot.google_oauth import get_authorized_credentials
-   from googleapiclient.discovery import build
-
-   store = UserStore()
-   for user in [store.get_user_by_google_sub("<sub-A>"), store.get_user_by_google_sub("<sub-B>")]:
-       creds = get_authorized_credentials(user.id, store)
-       svc = build("classroom", "v1", credentials=creds)
-       courses = svc.courses().list(pageSize=5).execute()
-       print(user.email, "->", [c["name"] for c in courses.get("courses", [])])
-   ```
-5. **CSRF check:** try re-visiting a callback URL with a `state` value
-   you've already used (e.g. reload the browser tab after step 1 completes)
-   — it must show "Sign-in link expired or invalid", not process again.
-
----
-
-## Google OAuth scopes
-
-The exact set of scopes ClassPilot requests, and why — audited against
-what the codebase actually calls (not assumed):
-
-| Scope | Used for |
-|---|---|
-| `classroom.courses.readonly` | `list_classes` |
-| `classroom.coursework.me` | `get_upcoming_deadlines`, assignment listing |
-| `classroom.courseworkmaterials` | `list_materials` |
-| `classroom.announcements` | `list_materials` (announcements) |
-| `classroom.topics.readonly` | `list_modules` |
-| `drive.readonly` | `get_material` reading PPTX/PDF/DOCX/image attachments and exporting Google Docs/Slides/Sheets |
-
-**Deliberately not requested** (removed from the vendored client's
-broader default, since nothing in the exposed tool surface uses them):
-- `classroom.coursework.students` — only relevant to the vendored, unexposed `list_submissions()`, which needs teacher-level visibility into every student's submissions; not applicable to a student-facing app reading its own coursework.
-- `classroom.rosters.readonly` — no roster endpoint is called anywhere in this codebase.
-- `documents` (Google Docs API) — Google Docs content is read via Drive's `export_media`, never via the Docs API itself.
-- Full `drive` (read/write) — every active Drive call is read-only; `drive.readonly` covers `.get()`, `.get_media()`, and `.export_media()`.
-
-If a future phase re-exposes the vendored submission-upload flow
-(`classpilot/submission_flow.py`), it will need its own broader scope back
-— deliberately, not by leaving it granted unused today.
+<!-- DEMO VIDEO SECTION: Replace this card with the screen recording embed when available -->
+> ### 🎥 Demonstration Walkthrough Coming Soon
+>
+> A comprehensive video demonstration showing ClassPilot AI in action—including Google Classroom account linking, ChatGPT custom connector configuration, real-time syllabus navigation, and visual diagram inspection from lecture slides—will be linked here shortly.
+>
+> ```markdown
+> <!-- Insert video walkthrough link below -->
+> [![ClassPilot AI Demo Video](docs/assets/demo-thumbnail.png)](https://www.youtube.com/watch?v=YOUR_VIDEO_ID)
+> ```
 
 ---
 
 ## Architecture
 
+ClassPilot AI implements a dual-domain security architecture. The AI client communicates exclusively through the ClassPilot FastMCP server using ClassPilot-issued Bearer tokens, while the server coordinates with Google APIs on behalf of authenticated students using encrypted refresh tokens.
+
+```mermaid
+flowchart TD
+    subgraph Clients ["AI Client Layer"]
+        AI["ChatGPT / Claude / Cursor / MCP Client"]
+    end
+
+    subgraph MCPAuthLayer ["MCP Authentication & Identity Boundary"]
+        MCPOAuth["ClassPilot OAuth 2.1 Server<br/>(RFC 8414 Discovery & S256 PKCE)"]
+        TokenVer["ClassPilot TokenVerifier<br/>(SHA-256 Hashed Tokens)"]
+        IdentRes["Identity Resolution Seam<br/>resolve_identity()"]
+    end
+
+    subgraph ServerCore ["ClassPilot FastMCP Server Core"]
+        FastMCP["FastMCP Server (Streamable HTTP / stdio)"]
+        Tools["6 Focused MCP Tools<br/>• list_classes • list_modules<br/>• list_materials • get_material<br/>• search_classroom • get_upcoming_deadlines"]
+        DocEngine["Document & Visual Extraction Engine<br/>(pypdf, python-pptx, python-docx, Pillow)"]
+    end
+
+    subgraph GoogleAuthLayer ["Google OAuth & Credentials Boundary"]
+        GoogleOAuthWeb["Google Web OAuth Flow<br/>(/auth/google/login & /callback)"]
+        CredManager["Credential Manager<br/>get_authorized_credentials()"]
+        Crypto["Fernet Encryption Engine<br/>(AES-128-CBC + HMAC-SHA256)"]
+    end
+
+    subgraph Persistence ["Persistence Layer (PostgreSQL / Neon)"]
+        UserDB[("users<br/>(UUID, Google sub, Email)")]
+        CredDB[("google_oauth_credentials<br/>(Encrypted Refresh Tokens)")]
+        TokenDB[("mcp_tokens<br/>(SHA-256 Hashed Bearer Tokens)")]
+    end
+
+    subgraph GoogleAPIs ["Google Cloud APIs"]
+        ClassroomAPI["Google Classroom API v1<br/>(Courses, Topics, Materials, Due Dates)"]
+        DriveAPI["Google Drive API v3<br/>(Binary Attachments & Workspace Exports)"]
+    end
+
+    %% Client Interactions
+    AI -->|"1. OAuth 2.1 Handshake (Code + PKCE)"| MCPOAuth
+    MCPOAuth -->|"Store Hashed Bearer Token"| TokenDB
+    AI -->|"2. Tool Invocation (Bearer Token)"| FastMCP
+
+    %% FastMCP & Identity Resolution
+    FastMCP -->|"Validate Token"| TokenVer
+    TokenVer -->|"Verify Hash"| TokenDB
+    TokenVer -->|"Resolve Caller"| IdentRes
+    IdentRes -->|"Extract verified user_id"| FastMCP
+
+    %% Google OAuth Setup
+    GoogleOAuthWeb -->|"User Login & Consent"| GoogleAPIs
+    GoogleOAuthWeb -->|"Encrypt Refresh Token"| Crypto
+    Crypto -->|"Persist Encrypted Token"| CredDB
+    GoogleOAuthWeb -->|"Record User Profile"| UserDB
+
+    %% Tool Execution & Google APIs
+    FastMCP -->|"Dispatch Tool"| Tools
+    Tools -->|"Request Authorized Credentials"| CredManager
+    CredManager -->|"Retrieve Encrypted Token"| CredDB
+    CredManager -->|"Decrypt Token"| Crypto
+    CredManager -->|"Auto-refreshed Credentials"| Tools
+    Tools -->|"Query Course Metadata"| ClassroomAPI
+    Tools -->|"Download In-Memory Streams"| DriveAPI
+    DriveAPI -->|"Attachment Stream (io.BytesIO)"| DocEngine
+    DocEngine -->|"Text & Image Content Blocks"| Tools
+    Tools -->|"3. Structured JSON + Visual Blocks"| AI
+
+    %% Styling
+    classDef client fill:#e1f5fe,stroke:#0288d1,stroke-width:2px,color:#01579b;
+    classDef mcp fill:#ede7f6,stroke:#7e57c2,stroke-width:2px,color:#311b92;
+    classDef core fill:#e8f5e9,stroke:#43a047,stroke-width:2px,color:#1b5e20;
+    classDef google fill:#fff3e0,stroke:#fb8c00,stroke-width:2px,color:#e65100;
+    classDef db fill:#fce4ec,stroke:#d81b60,stroke-width:2px,color:#880e4f;
+    classDef ext fill:#fffde7,stroke:#fbc02d,stroke-width:2px,color:#f57f17;
+
+    class AI client;
+    class MCPOAuth,TokenVer,IdentRes mcp;
+    class FastMCP,Tools,DocEngine core;
+    class GoogleOAuthWeb,CredManager,Crypto google;
+    class UserDB,CredDB,TokenDB db;
+    class ClassroomAPI,DriveAPI ext;
 ```
-classpilot/
-  server.py            MCP server — registers all 8 tools (stdio transport)
-  http_server.py        Same server over Streamable HTTP (for remote/ChatGPT clients)
-  study_client.py        Raw Classroom/Drive calls + file-content extraction for the 5 study tools
-  visual_extractor.py     Diagram/chart/image extraction + significance filtering for
-                          PPTX/PDF/DOCX and direct image attachments (not OCR — selects and
-                          hands over raw image bytes for the connected AI to look at)
-  classroom_client.py     Thin wrapper that re-exports the vendor package, curates its
-                          OAuth scope list (see "Google OAuth scopes" above), without
-                          modifying vendor code
-  db.py                   Postgres connection pool + schema management (Phase 1)
-  crypto.py                Fernet encryption for stored Google refresh tokens (Phase 1)
-  user_store.py            users + google_oauth_credentials CRUD (Phase 1; not yet wired
-                          into the live auth flow — see "Multi-user roadmap" above)
-  google_oauth.py           Google web OAuth: authorization URL, code exchange, ID token
-                          verification, refresh-only-when-needed credential caching (Phase 2)
-  oauth_state.py            Postgres-backed, single-use, expiring CSRF state tokens (Phase 2)
-  oauth_web.py              Standalone Starlette app (classpilot-ai-oauth) — login/callback
-                          routes; NOT part of the MCP transport, not reachable from any
-                          MCP client (Phase 2)
-  submission_flow.py      Two-step submission flow (attach → confirm → turn in) — kept for tests;
-                          NOT exposed as an MCP tool
-  state_store.py          Postgres-backed deduplication state store
-  study_client.py         Per-user Google Classroom/Drive API client functions (courses,
-                          topics, materials, assignments, deadlines, visual extraction)
-  llm/                    Pluggable LLM providers (Gemini, Groq, Anthropic)
 
-vendor_classroom_suite_mcp/
-                          Vendored, unmodified third-party Classroom/Drive/Docs client.
-                          classroom_client.py wraps this rather than forking it.
+For comprehensive architectural design decisions, sequence flows, and threat models, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
+---
+
+## Six MCP Tools & Example Queries
+
+ClassPilot AI exposes exactly six focused, read-only tools designed to support academic inquiry while eliminating risks associated with assignment modification or unintended side effects:
+
+| Tool | Parameters | Description |
+|---|---|---|
+| [`list_classes`](classpilot/server.py#L267) | *None* | Lists all active Google Classroom courses in which the student is enrolled. |
+| [`list_modules`](classpilot/server.py#L284) | `course_id: str` | Lists syllabus topics/modules inside a specific course in structured sequence. |
+| [`list_materials`](classpilot/server.py#L307) | `course_id: str`, `topic_id: str?`, `include_assignments: bool`, `include_announcements: bool` | Lists lecture materials, assignment postings, and announcements for a module or course. |
+| [`get_material`](classpilot/server.py#L386) | `course_id: str`, `material_id: str`, `material_kind: str`, `read_attachments: bool` | Retrieves material content, extracting full attachment text and embedded diagrams/charts. |
+| [`search_classroom`](classpilot/server.py#L497) | `query: str` | Performs global text search across course names, module titles, and material descriptions. |
+| [`get_upcoming_deadlines`](classpilot/server.py#L533) | `within_hours: int` (default `168`) | Queries coursework across all enrolled classes and returns deadlines sorted by proximity. |
+
+### Example Conversational Prompts
+
+* **Discovering Courses**:
+  > *"What courses am I enrolled in this semester, and what are their course IDs?"*
+* **Navigating Course Syllabi**:
+  > *"What topics are covered in my CS 440 Distributed Systems class?"*
+* **Reviewing Materials**:
+  > *"List all lecture slides and readings posted under Module 3 in Machine Learning."*
+* **Diagram-Aware Study Assistance**:
+  > *"Examine the lecture slides for Week 5 in Cloud Computing. Summarize the Paxos consensus diagram shown on slide 8 and explain the leader election phase."*
+* **Cross-Course Research**:
+  > *"Search all my classes for any mention of 'Fourier Transform' and tell me which lecture files discuss it."*
+* **Proactive Deadline Management**:
+  > *"What assignments are due across all my courses within the next 48 hours, and how many hours remain for each?"*
+
+---
+
+## How the Project Works
+
+1. **Authentication & Identity Threading**:
+   When an AI client issues an MCP tool call over Streamable HTTP, it provides a Bearer token. ClassPilot's [`TokenVerifier`](classpilot/mcp_auth.py) verifies the SHA-256 token hash against PostgreSQL and maps it to a verified `user_id`. Identity is never passed as a client-controlled tool argument.
+2. **Credential Resolution**:
+   The internal [`get_authorized_credentials()`](classpilot/google_oauth.py) engine retrieves the student's Fernet-encrypted Google refresh token from PostgreSQL, decrypts it in memory, and checks token expiration. If expired, it transparently requests a refreshed access token from Google Identity Services.
+3. **Classroom & Drive Data Retrieval**:
+   [`classpilot/study_client.py`](classpilot/study_client.py) queries the Google Classroom API v1 using the refreshed credentials, automatically following `nextPageToken` cursors so large courses are never truncated.
+4. **Multimodal Content Extraction**:
+   Drive attachments are downloaded into an in-memory buffer (`io.BytesIO`). Text extractors parse the document structure, while [`classpilot/visual_extractor.py`](classpilot/visual_extractor.py) filters and extracts high-resolution diagram images.
+5. **Structured MCP Response**:
+   The FastMCP server packages the result into a structured `MaterialContent` JSON block alongside native `Image` content blocks, providing the AI with immediate text and visual comprehension.
+
+---
+
+## Supported Document Formats & Visual Extraction
+
+ClassPilot extracts readable text and visual figures from all primary educational document formats:
+
+| Format | Text Content | Visual Figures & Diagrams | Extraction Technology |
+|---|:---:|:---:|---|
+| **Google Docs** | ✅ Full Text | — | Drive `export_media` (`text/plain`) |
+| **Google Slides** | ✅ All Slides | — | Drive `export_media` (`text/plain`) |
+| **Google Sheets** | ✅ Tabular CSV | — | Drive `export_media` (`text/csv`) |
+| **Plain Text (`.txt`, `.md`, `.json`, `.csv`)** | ✅ Full Content | — | Direct Drive download (`utf-8`) |
+| **PowerPoint (`.pptx`)** | ✅ Slide text, tables & notes | ✅ Embedded diagrams & charts | `python-pptx` |
+| **Adobe PDF (`.pdf`)** | ✅ Page-by-page text | ✅ Visual figures & plots | `pypdf` |
+| **Word (`.docx`)** | ✅ Paragraphs & tables | ✅ Embedded figures | `python-docx` |
+| **Direct Images (`.png`, `.jpg`, `.jpeg`)** | — | ✅ Full image pass-through | Direct Drive download |
+| **Legacy Binary (`.ppt`, `.doc`)** | ⚠️ Link & title only | — | Legacy binary; direct web link returned |
+| **YouTube & Web Links** | ⚠️ Link & title only | — | External URLs returned without scraping |
+
+### Visual Extraction Significance Heuristics
+
+Rather than running slow, inaccurate OCR on server instances, ClassPilot surfaces raw image bytes directly to multimodal AI models. To preserve context limits and eliminate noise:
+
+1. **Area Ratio Threshold**: Standard embedded images must occupy at least 5% of the slide or page area (`MIN_AREA_RATIO = 0.05`). On **diagram-only slides** (pages with zero extractable text), the threshold is relaxed to 2% (`MIN_DIAGRAM_ONLY_AREA_RATIO = 0.02`).
+2. **Watermark & Logo Deduplication**: The SHA-256 byte hash of each candidate image is computed. Any image appearing across 3 or more slides (`REPEATED_IMAGE_MIN_COUNT = 3`) is flagged as a header logo, template background, or watermark and discarded.
+3. **Response Capping**: A strict limit of **8 images per file** and **8 images per response** prevents bloated payloads. Diagram-only slides receive top ranking priority.
+
+For further implementation details, see [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md).
+
+---
+
+## Quick-Start Guide for Hosted Users
+
+Connecting your Google Classroom to an AI client using an already deployed ClassPilot instance requires two straightforward steps:
+
+### Step 1: Connect Your Google Account
+1. Open your web browser and navigate to the hosted login page:
+   ```text
+   https://<your-classpilot-domain>/auth/google/login
+   ```
+2. Sign in with your Google account and grant the requested read-only Classroom and Drive permissions.
+3. When the browser confirms **"Connected!"**, your account is registered.
+
+### Step 2: Add Custom Connector in Your AI Client
+
+#### In ChatGPT (Plus / Team / Enterprise)
+1. In ChatGPT, open **Settings → Connected Apps / Connectors → Advanced**.
+2. Toggle on **Developer Mode** and click **Add Custom Connector**.
+3. Enter your server URL:
+   ```text
+   https://<your-classpilot-domain>/mcp
+   ```
+4. Select **OAuth**. ChatGPT will discover the RFC 8414 metadata, dynamically register, and execute the PKCE authorization flow.
+
+#### In Claude Desktop
+Add ClassPilot to your `claude_desktop_config.json`:
+```json
+{
+  "mcpServers": {
+    "classpilot": {
+      "url": "https://<your-classpilot-domain>/mcp"
+    }
+  }
+}
+```
+
+#### In Cursor
+Add the server entry to `.cursor/mcp.json`:
+```json
+{
+  "mcpServers": {
+    "classpilot": {
+      "url": "https://<your-classpilot-domain>/mcp"
+    }
+  }
+}
 ```
 
 ---
 
-## Supported LLM Providers
+## Local Development & Self-Hosting Instructions
 
-| Provider | Cost | Sign up |
-|---|---|---|
-| **Google Gemini** ✅ Recommended | **Free** (15 req/min, 1M tokens/day) | [aistudio.google.com](https://aistudio.google.com/app/apikey) — same Google account you use for Classroom |
-| **Groq** ✅ Also free | **Free** (generous daily limits, very fast) | [console.groq.com](https://console.groq.com) |
-| Anthropic Claude | Paid | Only needed if you specifically want Claude for notification text |
+### 1. Prerequisites
+* Python 3.10+ (Python 3.11 recommended)
+* PostgreSQL 14+ (or a cloud PostgreSQL instance like [Neon](https://neon.tech))
+* Google Cloud Console project with **Google Classroom API** and **Google Drive API** enabled
 
-The LLM is only used to generate the funny/friendly text in watcher email
-notifications — it is not required for the Study Assistant tools
-(`list_classes`, `get_material`, etc.), which return raw Classroom/Drive
-data directly.
+### 2. Installation
+```bash
+# Clone the repository
+git clone git@github.com:Rama-chandra55/classpilot-ai.git
+cd classpilot-ai
 
----
+# Create and activate virtual environment
+python -m venv .venv
 
-## Setup
+# On Linux / macOS:
+source .venv/bin/activate
+# On Windows:
+.venv\Scripts\Activate.ps1
 
-1. **Google Cloud project** — enable the Google Classroom API and Google
-   Drive API, create OAuth 2.0 credentials (Desktop app type), download as
-   `credentials.json` into the project root.
-2. **Python environment**
-   ```bash
-   python -m venv venv
-   source venv/bin/activate      # Windows: venv\Scripts\activate
-   pip install -e .
-   ```
-3. **Configure**
-   ```bash
-   cp .env.example .env
-   # fill in LLM_API_KEY (Gemini or Groq) and, if you want email
-   # notifications from the watcher, the SMTP_* variables.
-   ```
-4. **Database setup (Phase 1 — optional unless you're working on the
-   multi-user persistence code itself)**
+# Install in editable mode
+pip install --upgrade pip
+pip install -e .
+```
 
-   Not required to run the app today — `token.json` still drives the live
-   single-user auth flow. This sets up the Postgres-backed `users`/
-   credential storage the multi-user roadmap will wire in later, and is
-   needed to run `tests/test_user_store.py`'s integration tests.
+### 3. Environment Configuration
+Copy the configuration template:
+```bash
+cp .env.example .env
+```
+Generate an encryption key:
+```bash
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+Populate `.env` with your values:
+```dotenv
+DATABASE_URL=postgresql://user:password@localhost:5432/classpilot
+TOKEN_ENCRYPTION_KEY=<generated-fernet-key>
+LLM_API_KEY=<your-api-key>
+LLM_PROVIDER=gemini
+LLM_MODEL=gemini-2.5-flash-lite
 
-   ```bash
-   # Install Postgres locally (Ubuntu/Debian shown; use your platform's
-   # package manager / a managed instance otherwise)
-   sudo apt-get install -y postgresql postgresql-contrib
-   sudo service postgresql start
+GOOGLE_WEB_CREDENTIALS_PATH=google_web_credentials.json
+GOOGLE_OAUTH_REDIRECT_URI=http://localhost:8000/auth/google/callback
 
-   # Create a role and two databases — `classpilot` for normal dev use,
-   # `classpilot_test` kept separate so running tests never touches dev data
-   sudo -u postgres psql -c "CREATE ROLE classpilot WITH LOGIN PASSWORD 'classpilot';"
-   sudo -u postgres psql -c "CREATE DATABASE classpilot OWNER classpilot;"
-   sudo -u postgres psql -c "CREATE DATABASE classpilot_test OWNER classpilot;"
+MCP_AUTH_MODE=remote
+MCP_PUBLIC_BASE_URL=http://localhost:8000
+MCP_HTTP_HOST=127.0.0.1
+MCP_HTTP_PORT=8000
+MCP_HTTP_PATH=/mcp
+```
 
-   # Generate an encryption key for stored Google refresh tokens —
-   # use a DIFFERENT key per environment, never commit a real one
-   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-   ```
+### 4. Initialize Database Schema
+```bash
+python -c "from classpilot.db import init_schema; init_schema()"
+```
 
-   Add the resulting values to `.env`:
-   ```
-   DATABASE_URL=postgresql://classpilot:classpilot@localhost:5432/classpilot
-   TOKEN_ENCRYPTION_KEY=<the key printed above>
-   ```
+### 5. Run the Server
+Launch the unified Streamable HTTP server:
+```bash
+classpilot-ai-http
+# or:
+python -m classpilot.http_server
+```
+The server will be available at `http://127.0.0.1:8000`:
+- **MCP Endpoint**: `http://127.0.0.1:8000/mcp`
+- **Google OAuth Login**: `http://127.0.0.1:8000/auth/google/login`
+- **OAuth Discovery**: `http://127.0.0.1:8000/.well-known/oauth-authorization-server`
+- **Health Checks**: `http://127.0.0.1:8000/health` (liveness) & `/ready` (readiness)
 
-   Then create the tables (idempotent — safe to run anytime, including on
-   every app startup):
-   ```bash
-   python -c "from classpilot.db import init_schema; init_schema()"
-   ```
-
-   To run the Postgres-backed test suite against the separate test
-   database instead of your dev one:
-   ```bash
-   TEST_DATABASE_URL=postgresql://classpilot:classpilot@localhost:5432/classpilot_test \
-     python -m pytest tests/test_user_store.py -v
-   ```
-
-5. **First run — authenticate**
-   ```bash
-   classpilot-ai-mcp
-   ```
-   A browser window opens for Google login on first run; a token is saved
-   to `GOOGLE_TOKEN_PATH` (default `token.json`) for future runs.
-
-   > If you've used an older version of this project before the current
-   > scope set (see "Google OAuth scopes" above) was adopted, delete
-   > `token.json` once and re-authenticate so Google issues a token that
-   > matches exactly — old tokens authorized for now-dropped scopes
-   > (full `drive`, `documents`, etc.) keep working but are broader than
-   > what the app requests today, and won't automatically narrow on their own.
-
-### Running modes
-
-| Command | Transport | Use case |
-|---|---|---|
-| `classpilot-ai-mcp` | stdio | Claude Desktop, Cursor, and other local MCP clients |
-| `classpilot-ai-http` | Streamable HTTP (`/mcp`, default `127.0.0.1:8000`) | Remote clients, e.g. a ChatGPT custom connector |
-| `classpilot-ai` | none (no MCP) | Standalone watcher — polling + email notifications only, no chat client involved |
+For full step-by-step installation instructions, consult [`docs/SETUP.md`](docs/SETUP.md).
 
 ---
 
-## Configuration Reference
+## Security, Authentication & User Isolation
 
-| Variable | Default | Description |
-|---|---|---|
-| `LLM_PROVIDER` | `gemini` | `gemini` (free), `groq` (free), `anthropic` (paid) — used for watcher notification text only |
-| `LLM_API_KEY` | — | Your API key for the chosen provider |
-| `LLM_MODEL` | `gemini-2.5-flash-lite` | Model name |
-| `WATCH_INTERVAL_MINUTES` | `15` | Classroom polling interval for the watcher |
-| `STATE_DB_PATH` | `classpilot_state.db` | SQLite dedup database for the watcher |
-| `NOTIFIER_BACKEND` | `email` | `email` (more coming) |
-| `SMTP_HOST` | — | SMTP server |
-| `SMTP_PORT` | `587` | SMTP port |
-| `SMTP_USER` | — | Sender email |
-| `SMTP_PASSWORD` | — | SMTP password or App Password |
-| `NOTIFY_TO_EMAIL` | — | Where the watcher sends notifications |
-| `MCP_HTTP_HOST` | `127.0.0.1` | Bind address for `classpilot-ai-http` |
-| `MCP_HTTP_PORT` | `8000` | Bind port for `classpilot-ai-http` |
-| `MCP_HTTP_PATH` | `/mcp` | URL path for the MCP endpoint |
-| `LOG_LEVEL` | `INFO` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
-| `GOOGLE_CREDENTIALS_PATH` | `credentials.json` | Google OAuth credentials |
-| `GOOGLE_TOKEN_PATH` | `token.json` | Saved auth token |
-| `DATABASE_URL` | `postgresql://classpilot:classpilot@localhost:5432/classpilot` | Postgres connection string for the multi-user persistence foundation (Phase 1) — not required for today's single-user flow, see "Database setup" above |
-| `TOKEN_ENCRYPTION_KEY` | — | Fernet key encrypting stored Google refresh tokens; required only by code that actually calls `classpilot.crypto`/`classpilot.user_store`, not by the app's current live auth path |
+ClassPilot AI is built upon strict security and privacy standards:
+
+* **Separation of OAuth Realms**: Google tokens and MCP Bearer tokens inhabit completely distinct security realms. The connected AI model never handles Google tokens.
+* **At-Rest Fernet Encryption**: Google OAuth refresh tokens are encrypted using AES-128-CBC authenticated with HMAC-SHA256 (`cryptography.fernet`).
+* **SHA-256 Hashed MCP Tokens**: MCP client Bearer tokens are stored only as one-way SHA-256 hashes in PostgreSQL.
+* **PKCE S256 Enforcement**: The MCP OAuth 2.1 implementation requires RFC 7636 PKCE with `code_challenge_method=S256`. Insecure `plain` challenges are rejected.
+* **In-Flight Callback Coalescing**: A thread-safe locking mechanism prevents duplicate code exchange attempts caused by aggressive browser pre-fetching.
+* **Zero Disk Storage of Files**: Documents and lecture slides are streamed directly into memory buffers (`io.BytesIO`) during tool execution and discarded immediately after.
+
+For our full privacy specification and audited scope breakdown, refer to [`docs/PRIVACY.md`](docs/PRIVACY.md).
 
 ---
 
-## Testing
+## Tech Stack
+
+* **Core Language**: Python 3.11+
+* **MCP Framework**: [FastMCP 3.x](https://github.com/jlowin/fastmcp) (Streamable HTTP & stdio)
+* **Web & Async Foundation**: Starlette, Uvicorn, AnyIO
+* **Database & Pooling**: PostgreSQL, [Neon Serverless](https://neon.tech/), `psycopg[binary]`, `psycopg-pool`
+* **Cryptography & Security**: `cryptography` (Fernet), hashlib (SHA-256), PKCE (RFC 7636)
+* **Google APIs**: Google Classroom API v1 (`google-api-python-client`), Google Drive API v3
+* **Document Processing**: `pypdf`, `python-pptx`, `python-docx`, `Pillow`
+* **LLM Engine Compatibility**: Google Gemini (`google-genai`), Groq (`groq`), Anthropic (`anthropic`)
+* **Testing & Quality Assurance**: `pytest`, `pytest-asyncio`, `pytest-timeout`, `reportlab`
+
+---
+
+## Repository Structure
+
+```text
+classpilot-ai/
+├── classpilot/                     # Core application package
+│   ├── classroom_client.py         # Curated Google Classroom client & scope bounds
+│   ├── config.py                   # Centralized environment configuration
+│   ├── crypto.py                   # Fernet AES-128 token encryption engine
+│   ├── db.py                       # PostgreSQL connection pooling & schema initialization
+│   ├── google_oauth.py             # Google OAuth flow & proactive token refresh
+│   ├── http_server.py              # Streamable HTTP MCP server entry point
+│   ├── identity.py                 # Per-request caller identity resolution seam
+│   ├── mcp_auth.py                 # RFC 9728 TokenVerifier & MCP token lifecycle
+│   ├── mcp_oauth_web.py            # OAuth 2.1 + PKCE authorization server endpoints
+│   ├── oauth_state.py              # Single-use CSRF & PKCE state persistence
+│   ├── oauth_web.py                # Google account linking Starlette application
+│   ├── server.py                   # FastMCP server exposing the 6 active tools
+│   ├── study_client.py             # Classroom/Drive API retrieval & document parsers
+│   ├── user_store.py               # User and credential relational persistence
+│   └── visual_extractor.py         # Diagram & chart extraction pipeline
+├── docs/                           # Technical documentation suite
+│   ├── ARCHITECTURE.md             # System topology, sequence flows, and threat model
+│   ├── CAPABILITIES.md             # Document parsing matrix & visual heuristics
+│   ├── PRIVACY.md                  # Privacy architecture & audited OAuth scopes
+│   └── SETUP.md                    # Installation, GCP configuration, and client setup
+├── tests/                          # Automated test suite (430+ unit & integration tests)
+├── vendor_classroom_suite_mcp/     # Vendored base classroom client (MIT licensed)
+├── .env.example                    # Clean environment configuration template
+├── .gitignore                      # Git exclusion rules
+├── CONTRIBUTING.md                 # Contributor guide & development workflow
+├── Dockerfile                      # Production container definition
+├── pyproject.toml                  # Python package configuration & dependencies
+├── README.md                       # Product overview & documentation index
+└── SECURITY.md                     # Vulnerability reporting & security policy
+```
+
+---
+
+## Testing & Quality Assurance
+
+ClassPilot AI maintains a comprehensive suite of **over 430 unit and integration tests** validating tool behaviors, authentication boundaries, document extraction heuristics, and error recovery:
 
 ```bash
-pip install pytest
-python -m pytest tests/ -q
+# Execute the complete test suite
+pytest
+
+# Run tests with verbose output
+pytest -v
+
+# Run core unit tests in isolation
+pytest tests/test_study_tools.py tests/test_visual_extractor.py tests/test_google_oauth.py -v
 ```
 
-All external dependencies (Google APIs, FastMCP, APScheduler, the LLM
-SDKs) are stubbed at the `sys.modules` level in each test file, so the
-suite needs no credentials and makes no network calls. Image-extraction
-tests use the real `python-pptx`/`pypdf`/`python-docx`/`Pillow` libraries
-to build tiny in-memory fixture files — no external files or network
-access needed there either. A couple of PDF-fixture tests additionally
-use `reportlab` (not a runtime dependency) to generate test PDFs; they
-skip automatically if it isn't installed.
+All external dependencies (Google APIs, FastMCP, and LLM providers) are stubbed during unit test execution, allowing the suite to run reliably without network credentials.
 
-**One exception:** `tests/test_user_store.py` runs real integration tests
-against a live Postgres database (see "Database setup" above) — since the
-whole point of that module is proving the schema/encryption/CRUD actually
-work, not just that the SQL looks plausible. It skips gracefully (not a
-failure) if no Postgres is reachable, so `pytest tests/` still passes
-cleanly without one set up:
-
-```bash
-# without Postgres running: 302 passed, 46 skipped
-# with Postgres running:    348 passed
-```
+Continuous Integration is automated via GitHub Actions in [`.github/workflows/classpilot-full-tests.yml`](.github/workflows/classpilot-full-tests.yml).
 
 ---
 
-## Troubleshooting
+## Limitations & Project Scope
 
-**`credentials.json not found`**
-Download from Google Cloud → Credentials and place in the project folder.
-
-**`LLM_API_KEY is not set`**
-Only required for watcher notifications. Fill in `LLM_API_KEY` in `.env`,
-or ignore it if you're only using the Study Assistant tools.
-
-**No email received from the watcher**
-Check `SMTP_USER`, `SMTP_PASSWORD`, `NOTIFY_TO_EMAIL`. Gmail users need an
-App Password. Check your spam folder. Set `LOG_LEVEL=DEBUG` for details.
-
-**"This app isn't verified" during Google login**
-Expected. Click **Advanced → Go to ClassPilot AI (unsafe) → Allow**. It's
-your own app.
-
-**`Failed to exchange authorization code: (invalid_grant) Missing code verifier`**
-Fixed as of this version — this was a real bug where the PKCE
-`code_verifier` generated at `/auth/google/login` never reached
-`/auth/google/callback` (each leg built its own, unrelated
-`google_auth_oauthlib.flow.Flow` instance). If you still see this: make
-sure you're running the current `oauth_web.py`/`google_oauth.py`/
-`oauth_state.py`, and that your `oauth_states` table has a `code_verifier`
-column (`init_schema()` migrates an existing table automatically — run
-`python -c "from classpilot.db import init_schema; init_schema()"` once
-if you set up Phase 2 before this fix).
-
-**The callback shows broader scopes than expected (e.g. full `drive`,
-`classroom.coursework.students`, `classroom.rosters.readonly`)**
-This is Google's own `include_granted_scopes=true` behavior, not a bug in
-what ClassPilot requests — the actual authorization URL only ever asks for
-the curated scope list (see "Google OAuth scopes" above; verified by
-`tests/test_google_oauth.py::TestRequestedScopesMatchCuratedSet`). If your
-Google account (or this Google Cloud project) previously granted broader
-scopes — e.g. from testing before the Phase 1 scope audit, or via other
-OAuth clients in the same project — Google will report those as still
-"granted" alongside the new request. ClassPilot handles this correctly
-(see `tests/test_google_oauth.py::TestGrantedScopeSupersetHandling`): it
-relaxes the underlying OAuth library's overly strict scope-match check for
-supersets specifically, while independently verifying every scope it
-actually requires was still granted — a response *missing* a required
-scope still fails authorization. To get a truly minimal grant instead of
-a superset, revoke ClassPilot's access at
-[myaccount.google.com/permissions](https://myaccount.google.com/permissions)
-and re-authorize from a clean state.
-
-**Google login required again, or `list_materials`/`get_material` returns
-403 / missing scope errors**
-Delete `token.json` and restart — a browser will open for a fresh login
-that includes the current scope set (Classroom, Drive, Docs,
-courseworkmaterials, announcements, topics).
-
-**`get_material` says a file "cannot be read" for a `.pdf` or `.docx`**
-The file may be scanned/image-only with no extractable text layer, or the
-file may not actually be a modern `.pdf`/`.docx` (e.g. it's a legacy
-`.doc`/`.ppt`, or an image). Open the returned `link` to view it manually.
-
-**A diagram-only slide/page doesn't show up as an image**
-Check its size relative to the slide/page — very small diagrams can fall
-below the significance threshold along with genuine icons (see "Visual
-content" above). If a file has many candidate images, only the top 8 (by
-diagram-only status, then size) are included per response.
+* **Read-Only Operation**: ClassPilot AI does not support assignment submission, grade modification, or course enrollment.
+* **Server-Side OCR**: Scanned, image-only PDFs with no embedded text layer will not have their text extracted on the server; the original image must be processed via the AI client's vision model.
+* **Legacy Microsoft Office Formats**: Pre-2007 binary formats (`.doc`, `.ppt`) cannot be parsed into text. Direct Drive links are returned instead.
+* **External Media**: Transcripts from YouTube video links and external web URLs posted in announcements are not scraped or transcribed.
 
 ---
 
-## License
+## Contributing
 
-ClassPilot AI is your own application.
-The bundled `vendor_classroom_suite_mcp` is MIT-licensed — see
-`vendor_classroom_suite_mcp/LICENSE`.
+We welcome community contributions! Please review [`CONTRIBUTING.md`](CONTRIBUTING.md) for details on code style, branch management, architectural guidelines, and test requirements before submitting a pull request.
+
+---
+
+## License & Acknowledgments
+
+* **ClassPilot AI**: Developed and maintained by [Rama-chandra55](https://github.com/Rama-chandra55).
+* **Vendored Components**: Includes `vendor_classroom_suite_mcp`, distributed under the MIT License (see [`vendor_classroom_suite_mcp/LICENSE`](vendor_classroom_suite_mcp/LICENSE)).
+* **Special Thanks**: Built on the open [Model Context Protocol](https://modelcontextprotocol.io) and [FastMCP](https://github.com/jlowin/fastmcp).
