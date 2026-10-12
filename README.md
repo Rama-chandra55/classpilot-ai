@@ -14,7 +14,8 @@
 [![CI Tests](https://img.shields.io/badge/Tests-430%2B%20Passing-success?style=flat&logo=githubactions&logoColor=white)](.github/workflows/classpilot-full-tests.yml)
 
 <p align="center">
-  A production-grade Model Context Protocol (MCP) server that empowers ChatGPT, Claude, Cursor, and any MCP-compatible AI client to navigate Google Classroom courses, read complex course materials, and visually inspect lecture diagrams with rigorous multi-tenant security.
+  <b>Production FastMCP server bridging ChatGPT & Claude directly to Google Classroom.</b><br>
+  Engineered with OAuth 2.1 + PKCE, visual slide diagram extraction, encrypted credential persistence, and multi-tenant isolation.
 </p>
 
 [Quick Start](#quick-start-guide-for-hosted-users) • [Architecture](#architecture) • [Six MCP Tools](#six-mcp-tools--example-queries) • [Visual Extraction](#supported-document-formats--visual-extraction) • [Documentation](docs/)
