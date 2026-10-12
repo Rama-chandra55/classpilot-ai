@@ -1,9 +1,18 @@
 [project]
 name = "classpilot-ai"
 version = "0.2.0"
-description = "ClassPilot AI - an AI-powered academic assistant built on top of classroom-suite-mcp"
+description = "Production FastMCP server bridging ChatGPT & Claude to Google Classroom with secure OAuth 2.1, multimodal diagram extraction, and multi-user isolation"
 readme = "README.md"
 requires-python = ">=3.10"
+keywords = [
+    "mcp",
+    "model-context-protocol",
+    "mcp-server",
+    "google-classroom",
+    "claude-desktop",
+    "fastmcp",
+    "ai-study-assistant",
+]
 dependencies = [
     "python-dotenv>=1.0.0",
     # --- Google (free LLM + Classroom/Drive APIs) ---
