@@ -12,13 +12,19 @@
 [![Security](https://img.shields.io/badge/Auth-OAuth%202.1%20%2B%20PKCE-brightgreen?style=flat)](docs/ARCHITECTURE.md)
 [![Encryption](https://img.shields.io/badge/Tokens-Fernet%20AES--128--CBC-success?style=flat)](docs/PRIVACY.md)
 [![CI Tests](https://img.shields.io/badge/Tests-430%2B%20Passing-success?style=flat&logo=githubactions&logoColor=white)](.github/workflows/classpilot-full-tests.yml)
+[![Website](https://img.shields.io/badge/Website-classpilot--ai.floot.app-FF3B30?style=flat&logo=googlechrome&logoColor=white)](https://classpilot-ai.floot.app)
 
 <p align="center">
   <b>Production FastMCP server bridging ChatGPT & Claude directly to Google Classroom.</b><br>
   Engineered with OAuth 2.1 + PKCE, visual slide diagram extraction, encrypted credential persistence, and multi-tenant isolation.
 </p>
 
-[Quick Start](#quick-start-guide-for-hosted-users) • [Architecture](#architecture) • [Six MCP Tools](#six-mcp-tools--example-queries) • [Visual Extraction](#supported-document-formats--visual-extraction) • [Documentation](docs/)
+<p align="center">
+  <a href="https://classpilot-ai.floot.app"><b>🌐 Visit Website</b></a> &nbsp;•&nbsp;
+  <a href="https://classpilot-ai.onrender.com/auth/google/login"><b>🔗 Connect Google Classroom</b></a>
+</p>
+
+[Visit Website](https://classpilot-ai.floot.app) • [Connect Google Classroom](https://classpilot-ai.onrender.com/auth/google/login) • [Live Website](#live-website) • [Quick Start](#quick-start-guide-for-hosted-users) • [Architecture](#architecture) • [Six MCP Tools](#six-mcp-tools--example-queries) • [Visual Extraction](#supported-document-formats--visual-extraction) • [Documentation](docs/)
 
 </div>
 
@@ -31,6 +37,18 @@
 Beyond simple metadata listing, ClassPilot performs **deep in-memory content and visual extraction**. It extracts structured text from slide presentations, documents, spreadsheets, and PDFs, while extracting diagrams, charts, and architectural figures as high-resolution visual blocks for vision-capable AI models.
 
 ClassPilot AI is built with an enterprise-grade security posture: multi-tenant PostgreSQL persistence, at-rest Fernet token encryption, SHA-256 hashed bearer tokens, and strict separation between MCP client authentication and Google OAuth credentials.
+
+The standalone public landing page is now live at [https://classpilot-ai.floot.app](https://classpilot-ai.floot.app).
+
+---
+
+## Live Website
+
+ClassPilot AI has a lightweight public landing page explaining the project, features, architecture, security, and onboarding flow.
+
+* **Website**: [https://classpilot-ai.floot.app](https://classpilot-ai.floot.app)
+* **Google Classroom Connection**: [https://classpilot-ai.onrender.com/auth/google/login](https://classpilot-ai.onrender.com/auth/google/login)
+* **Hosted MCP Endpoint**: `https://classpilot-ai.onrender.com/mcp`
 
 ---
 
@@ -242,8 +260,9 @@ Connecting your Google Classroom to an AI client using an already deployed Class
 ### Step 1: Connect Your Google Account
 1. Open your web browser and navigate to the hosted login page:
    ```text
-   https://<your-classpilot-domain>/auth/google/login
+   https://classpilot-ai.onrender.com/auth/google/login
    ```
+   (Alternatively, visit the [Live Website](https://classpilot-ai.floot.app) and click **Connect Google Classroom**.)
 2. Sign in with your Google account and grant the requested read-only Classroom and Drive permissions.
 3. When the browser confirms **"Connected!"**, your account is registered.
 
@@ -254,7 +273,7 @@ Connecting your Google Classroom to an AI client using an already deployed Class
 2. Toggle on **Developer Mode** and click **Add Custom Connector**.
 3. Enter your server URL:
    ```text
-   https://<your-classpilot-domain>/mcp
+   https://classpilot-ai.onrender.com/mcp
    ```
 4. Select **OAuth**. ChatGPT will discover the RFC 8414 metadata, dynamically register, and execute the PKCE authorization flow.
 
@@ -264,7 +283,7 @@ Add ClassPilot to your `claude_desktop_config.json`:
 {
   "mcpServers": {
     "classpilot": {
-      "url": "https://<your-classpilot-domain>/mcp"
+      "url": "https://classpilot-ai.onrender.com/mcp"
     }
   }
 }
@@ -276,7 +295,7 @@ Add the server entry to `.cursor/mcp.json`:
 {
   "mcpServers": {
     "classpilot": {
-      "url": "https://<your-classpilot-domain>/mcp"
+      "url": "https://classpilot-ai.onrender.com/mcp"
     }
   }
 }
