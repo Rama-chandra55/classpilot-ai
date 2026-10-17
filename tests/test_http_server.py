@@ -40,6 +40,7 @@ def _stub(*names):
 
 _stub(
     "anthropic", "dotenv", "fastmcp", "fastmcp.server", "fastmcp.server.auth",
+    "fastmcp.utilities", "fastmcp.utilities.types",
     "google.auth.transport.requests", "google.oauth2.credentials", "google.oauth2.id_token",
     "google_auth_oauthlib.flow",
     "googleapiclient.discovery", "googleapiclient.http", "googleapiclient.errors",
@@ -49,13 +50,17 @@ _stub(
 )
 sys.modules["fastmcp.server.auth"].AccessToken = type("AccessToken", (), {})
 sys.modules["fastmcp.server.auth"].TokenVerifier = type("TokenVerifier", (), {})
+sys.modules["fastmcp.utilities.types"].Image = type("Image", (), {})
 sys.modules["dotenv"].load_dotenv = lambda *a, **k: None
 
 # Minimal FastMCP stub — separate instance per server name so vendor
 # tools do not pollute the ClassPilot AI instance.
 class _FakeMCP:
-    def __init__(self, name="", **k):
+    def __init__(self, name="", instructions=None, *, website_url=None, icons=None, **k):
         self.name = name
+        self.instructions = instructions
+        self.website_url = website_url
+        self.icons = icons or []
         self._tools = {}
         self.run_calls = []
     def tool(self, *a, **k):
@@ -79,7 +84,10 @@ class _FakeMCP:
 _instances: dict = {}
 def _mcp_factory(name="", **k):
     if name not in _instances:
-        _instances[name] = _FakeMCP(name)
+        _instances[name] = _FakeMCP(name, **k)
+    else:
+        for attr, val in k.items():
+            setattr(_instances[name], attr, val)
     return _instances[name]
 
 _fake_mcp_instance = _mcp_factory("ClassPilot AI")
@@ -451,6 +459,15 @@ class TestHealthEndpoints(unittest.TestCase):
         r = client.get("/ready")
         self.assertEqual(r.status_code, 503)
         self.assertEqual(r.json(), {"status": "unavailable", "detail": "Database connection failed"})
+
+    def test_logo_returns_ok_png(self):
+        from starlette.testclient import TestClient
+        app = self._get_app()
+        client = TestClient(app)
+        r = client.get("/static/classpilot-logo.png")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.headers.get("content-type"), "image/png")
+        self.assertIn("public", r.headers.get("cache-control", ""))
 
 
 if __name__ == "__main__":

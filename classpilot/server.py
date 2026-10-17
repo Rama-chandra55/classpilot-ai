@@ -34,6 +34,14 @@ from typing import Any, Dict, List, Optional
 
 from fastmcp import FastMCP
 from fastmcp.utilities.types import Image
+try:
+    from mcp.types import Icon
+except ImportError:
+    from dataclasses import dataclass
+    @dataclass
+    class Icon:  # type: ignore
+        src: str
+        mime_type: str
 from pydantic import BaseModel, Field
 
 from .identity import resolve_identity, RequestIdentity, IdentityResolutionError
@@ -118,8 +126,18 @@ def _build_auth_provider():
     )
 
 
+CLASSPILOT_WEBSITE_URL = "https://classpilot-ai.floot.app"
+CLASSPILOT_ICON_URL = "https://classpilot-ai.onrender.com/static/classpilot-logo.png"
+
 mcp = FastMCP(
     name="ClassPilot AI",
+    website_url=CLASSPILOT_WEBSITE_URL,
+    icons=[
+        Icon(
+            src=CLASSPILOT_ICON_URL,
+            mime_type="image/png",
+        )
+    ],
     instructions=(
         "ClassPilot AI is your Google Classroom study assistant. "
         "Navigate: list_classes → list_modules → list_materials → get_material. "

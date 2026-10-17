@@ -17,6 +17,7 @@ RUN pip install --no-cache-dir .
 # Copy the application code and vendored dependencies
 COPY classpilot /app/classpilot
 COPY vendor_classroom_suite_mcp /app/vendor_classroom_suite_mcp
+COPY assets /app/assets
 
 # Change ownership to the non-root user
 RUN chown -R classpilot:classpilot /app

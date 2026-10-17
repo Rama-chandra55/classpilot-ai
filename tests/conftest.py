@@ -67,8 +67,13 @@ sys.modules["dotenv"].load_dotenv = lambda *a, **k: None
 
 # fastmcp stub
 class _FastMCP:
-    def __init__(self, *a, **k): pass
-    def tool(self): return lambda f: f
+    def __init__(self, name="ClassPilot AI", instructions=None, *, website_url=None, icons=None, **k):
+        self.name = name
+        self.instructions = instructions
+        self.website_url = website_url
+        self.icons = icons or []
+        self._tools = {}
+    def tool(self, *a, **k): return lambda f: f
 
 sys.modules["fastmcp"].FastMCP = _FastMCP
 

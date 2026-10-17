@@ -36,7 +36,28 @@ from .logging_setup import configure_logging
 from .server import mcp          # reuse the existing FastMCP instance — no duplication
 from .db import init_schema, get_connection
 
+from pathlib import Path
+
 logger = logging.getLogger(__name__)
+
+_LOGO_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "assets"
+    / "classpilot-logo.png"
+)
+
+
+async def classpilot_logo(request):
+    from starlette.responses import FileResponse, Response
+    if not _LOGO_PATH.exists():
+        return Response("Logo not found", status_code=404, media_type="text/plain")
+    return FileResponse(
+        _LOGO_PATH,
+        media_type="image/png",
+        headers={
+            "Cache-Control": "public, max-age=86400"
+        },
+    )
 
 
 async def health_check(request) -> "JSONResponse":
@@ -83,6 +104,17 @@ def main() -> None:
     # and combine it with our Phase 4 OAuth routes so everything is served from
     # ONE unified origin.
     import uvicorn
+
+    app = create_app(path=path)
+
+    uvicorn.run(
+        app,
+        host=host,
+        port=port,
+    )
+
+
+def create_app(path: str = "/mcp"):
     from starlette.routing import Route
     from .oauth_web import routes as oauth_routes
 
@@ -91,13 +123,9 @@ def main() -> None:
     app.router.routes.extend([
         Route("/health", health_check),
         Route("/ready", readiness_check),
+        Route("/static/classpilot-logo.png", classpilot_logo, methods=["GET"]),
     ])
-
-    uvicorn.run(
-        app,
-        host=host,
-        port=port,
-    )
+    return app
 
 
 if __name__ == "__main__":
