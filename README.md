@@ -1,8 +1,6 @@
 <div align="center">
 
-<img src="assets/classpilot-logo.png" alt="ClassPilot AI Logo" width="160" />
-
-# ClassPilot AI
+# ClassPilot AI <img src="assets/classpilot-logo.png" alt="ClassPilot AI Logo" width="30" height="30" align="center" style="vertical-align: middle;" />
 
 ### Your Google Classroom. One AI Conversation.
 
